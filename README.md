@@ -53,14 +53,9 @@ Requirements
 - OCaml: Just install `OPAM` which installs OCaml too: http://opam.ocaml.org/doc/Install.html
 
 
-Disclaimer: This is just a hack that demonstrates the ideal development workflow
-generating perfectly isolated sandboxes without any global instalations and is
-familiar to many developers that use `CommonJS/package.json`. It's extremely limited,
-and only models the workflow that `CommonJS` developers are accustomed to. This is a
-proof of concept, and `OPAM` is the actual package manager for OCaml.
+If you already know `CommonJS`, you already know `CommonML`. Most of this `README`
+is just a basic tutorial on `package.json`/`npm`.
 
-The following `README` is mostly just a basic tutorial on `package.json`/`npm`.
-If you already know `CommonJS`, you already know `CommonML`.
 
 00. Try Building an Example Project!
 ---------------
