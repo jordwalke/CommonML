@@ -8,7 +8,7 @@ var clc = require('cli-color');
 
 var argv = optimist.argv;
 
-var STYLE = path.join(__dirname, 'docGenerator', 'docStyleDark.css');
+var STYLE = path.join(__dirname, 'docGenerator', 'docStyle.css');
 
 
 var cliConfig = {
