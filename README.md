@@ -59,6 +59,9 @@ Check out the `package.json` file to see that it depends on a couple of other
     # Build some docs (open the link it generates)
     node node_modules/CommonML/build.js --doc=html
 
+    # If you have OCaml's Vim/Emacs Merlin plugin installed, editing
+    # any of the example files will now have working autocomplete.
+
 
 
 1. Make A Package From Scratch:
