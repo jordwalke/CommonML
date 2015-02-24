@@ -125,15 +125,22 @@ Depending on other `CommonML` packages is done exactly the same way as adding
 any other `npm` dependencies.
 
 1. Add any other valid `CommonML` packages to `dependencies`
-2. Now your `package.json` looks like:
-
-    "dependencies": {
-       "CommonML": "git://github.com/jordwalke/CommonML.git",
-       "SomeOtherPackage: "git://github.com/jordwalke/SomeOtherPackage.git"
-     },
-
+2. Now your `package.json` looks like Figure 1 below.
 3. Rerun `npm install`. This installs all dependencies into `node_modules`.
 4. Now your package's source files can simply refer to `SomeOtherPackage.TheirExportedModules.blah`.
+5. 
+
+
+
+
+Figure 1:
+
+
+      "dependencies": {
+         "CommonML": "git://github.com/jordwalke/CommonML.git",
+         "SomeOtherPackage: "git://github.com/jordwalke/SomeOtherPackage.git"
+       },
+
 
 Sharing:
 -------
