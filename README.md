@@ -24,6 +24,12 @@ remote dependencies. (Just use the standard `npm link` command).
 - `CommonML` autogenerates autocompletion for internal modules and dependencies
 in addition to docs.
 
+>> This is merely an experiment that explores an OCaml development workflow based
+on the familiar `CommonJS`.  `OPAM` is the official, high performance package
+manager for OCaml and you should use that instead of this project for real development.
+This is only intended for people who really want to try out OCaml development with
+their familiar `CommonJS` workflow/namespacing.
+
 
 **Automatically namespaces dependencies and generates docs**
 
