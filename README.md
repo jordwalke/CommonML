@@ -4,9 +4,12 @@
                         Automatically builds dependent projects
                             Generates Autocomplete Support
                                Generates Documentation
+                                    Just Hit Build
+
+
 
 - `CommonML` allows you to build OCaml programs on `CommonJS/package.json`.
-If you know `CommonJS/package.json`, there's not much to learn.
+If you know `CommonJS/package.json`, there's not much to learn (besides OCaml).
 - Dependencies are installed to the standard local directory `node_modules` sandbox.
 - Your project (and dependencies) are automatically built in the correct order, into
 a local artifact directory.
@@ -16,11 +19,23 @@ each exports a `Util` module, `CommonML` automatically generates module
 aliases that requires you to refer to them as `Package1.Util` and `Package2.Util`.
 Internal modules within `Package1` and `Package2` may reference their internal
 util module via `Util` (without namespace).
-- `CommonML` autogenerates autocompletion for internal modules and dependencies.
 - Developing/depending on local packages is the same as developing against
 remote dependencies. (Just use the standard `npm link` command).
+- `CommonML` autogenerates autocompletion for internal modules and dependencies
+in addition to docs.
 
-`npm` is a hosting service, in *addition* to a command line interface to `CommonJS/package.json`.
+
+**Automatically namespaces dependencies and generates docs**
+
+<img src="https://raw.githubusercontent.com/jordwalke/CommonML/master/img/CommonMLDoc.png" />
+
+**Automatically generates autocomplete for dependencies**
+
+<img src="https://raw.githubusercontent.com/jordwalke/CommonML/master/img/CommonMLAutoComplete.png" />
+
+
+
+Note: `npm` is a hosting service, in *addition* to a command line interface to `CommonJS/package.json`.
 You can use only the command line tools and host your dependencies at arbitrary
 git URLS (a reason why `CommonJS` is great). Nothing stops you from hosting
 OCaml code on `npm`'s hosted service too. The `npm` command line is just a tool for
