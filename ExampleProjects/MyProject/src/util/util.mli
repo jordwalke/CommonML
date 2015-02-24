@@ -1,0 +1,2 @@
+val myUtilVal: string
+

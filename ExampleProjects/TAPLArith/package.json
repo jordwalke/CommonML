@@ -1,0 +1,23 @@
+{
+  "name": "TAPLArith",
+  "version": "1.0.0",
+  "description": "Simple example of a project that requires compiling of parser/lexer. The first parsing project from the popular TAPL book",
+  "license": "BSD",
+  "notes": "",
+  "dependencies": {
+    "CommonML": "git://github.com/jordwalke/CommonML.git"
+  },
+  "CommonML": {
+    "exports": [],
+    "compileFlags": ["-w","-30","-w","-40", "-bin-annot"],
+    "linkFlags": [],
+    "findlibPackages": [
+    ],
+    "docFlags": [
+      "-colorize-code",
+      "-css-style",
+      "docStyle.css",
+      "-latex"
+    ]
+  }
+}

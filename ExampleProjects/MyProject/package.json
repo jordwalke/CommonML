@@ -1,0 +1,21 @@
+{
+  "name": "MyProject",
+  "version": "1.0.0",
+  "description": "Simple My Project example in OCaml",
+  "license": "BSD",
+  "dependencies": {
+    "CommonML": "git://github.com/jordwalke/CommonML.git",
+    "CommonMLExampleDependency": "git://github.com/jordwalke/CommonMLExampleDependency.git"
+  },
+  "CommonML": {
+    "exports": ["MyProjectMod"],
+    "compileFlags": ["-w","-30","-w","-40", "-bin-annot"],
+    "linkFlags": [],
+    "docFlags": [
+      "-colorize-code",
+      "-css-style",
+      "docStyle.css",
+      "-latex"
+    ]
+  }
+}
