@@ -146,15 +146,28 @@ var merge = function(one, two) {
   return result;
 };
 
-var sourceExtensions = {
+var stockSourceExtensions = {
   '.mli': true,
   '.ml': true,
   '.mll': true,
   '.mly': true,
 };
-var isSourceFile = function(absPath) {
+var isSourceFile = function(absPath, packageConfig) {
   var extName = path.extname(absPath);
-  return sourceExtensions[extName];
+  if (stockSourceExtensions[extName]) {
+    return true;
+  }
+  var extensions = packageConfig.packageJSON.CommonML.extensions;
+  if (!extensions) {
+    return false;
+  }
+  for (var i = 0; i < extensions.length; i++) {
+    var extension = extensions[i];
+    if (extension['interface'] === extName || extension['implementation'] === extName) {
+      return true;
+    }
+  }
+  return false;
 };
 
 var arraysDiffer = function(one, two) {
@@ -195,13 +208,34 @@ var aliasMapperFile = function(internal, packageConfig, rootPackageConfig, build
   return sanitizedPackPath;
 };
 
-var buildArtifact = function(filePath, buildConfig) {
+var maybeSourceKind = function(filePath, packageConfig) {
   var extName = path.extname(filePath);
-  var isML = extName === '.ml';
-  var isMLI = extName === '.mli';
-  var basenameBase = path.basename(filePath, extName);
-  return isML ? path.resolve(filePath, '..', basenameBase + objectExtension(buildConfig)) :
-    isMLI ? path.resolve(filePath, '..', basenameBase + '.cmi') :
+  if (extName === '.ml') {
+    return '.ml';
+  }
+  if (extName === '.mli') {
+    return '.mli';
+  }
+  var extensions = packageConfig.packageJSON.CommonML.extensions;
+  if (extensions) {
+    for (var i = 0; i < extensions.length; i++) {
+      var extension = extensions[i];
+      if (extension['implementation'] === extName) {
+        return '.ml';
+      }
+      if (extension['interface'] === extName) {
+        return '.mli';
+      }
+    }
+  }
+  return '';
+};
+
+var buildArtifact = function(filePath, buildConfig, packageConfig) {
+  var kind = maybeSourceKind(filePath, packageConfig);
+  var basenameBase = path.basename(filePath, path.extname(filePath));
+  return kind === '.ml' ? path.resolve(filePath, '..', basenameBase + objectExtension(buildConfig)) :
+    kind === '.mli' ? path.resolve(filePath, '..', basenameBase + '.cmi') :
     'NEVER_HAPPENS';
 };
 
@@ -241,9 +275,7 @@ var isExported = function(packageConfig, filePath) {
  */
 var getPublicSourceModules = function(unsanitizedPaths, packageConfig) {
   return unsanitizedPaths.filter(function(unsanitizedPath) {
-    var extName = path.extname(unsanitizedPath);
-    var isML = extName === '.ml';
-    if (!isML || !unsanitizedPath) {
+    if (maybeSourceKind(unsanitizedPath) !== '.ml' || !unsanitizedPath) {
       return false;
     }
     return isExported(packageConfig, unsanitizedPath);
@@ -264,7 +296,7 @@ var namespaceUppercase = function(packageConfig, name) {
 var getSanitizedPublicOutputs = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   return getPublicSourceModules(unsanitizedPaths, packageConfig).map(
     function(unsanitizedPath) {
-      var unsanitizedArtifact = unsanitizedPath.replace('.ml', objectExtension(buildConfig));
+      var unsanitizedArtifact = buildArtifact(unsanitizedPath, packageConfig);
       return sanitizedArtifact(unsanitizedArtifact, packageConfig, rootPackageConfig, buildConfig);
     }
   );
@@ -290,7 +322,7 @@ var getPublicBuildDirs = function(unsanitizedPaths, packageConfig, rootPackageCo
 
 var getFileCopyCommands = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   return unsanitizedPaths.map(function(unsanitizedPath) {
-    if (!isSourceFile(unsanitizedPath)) {
+    if (!isSourceFile(unsanitizedPath, packageConfig)) {
       throw new Error('Do not know what to do with :' + unsanitizedPath);
     }
     return [
@@ -303,7 +335,7 @@ var getFileCopyCommands = function(unsanitizedPaths, packageConfig, rootPackageC
 
 var getFileCopyCommandsForDoc = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   return unsanitizedPaths.map(function(unsanitizedPath) {
-    if (!isSourceFile(unsanitizedPath)) {
+    if (!isSourceFile(unsanitizedPath, packageConfig)) {
       throw new Error('Do not know what to do with :' + unsanitizedPath);
     }
     return [
@@ -317,9 +349,7 @@ var getFileCopyCommandsForDoc = function(unsanitizedPaths, packageConfig, rootPa
 
 var createAliases = function(unsanitizedPaths, packageConfig) {
   return unsanitizedPaths.map(function(unsanitizedPath) {
-    var extName = path.extname(unsanitizedPath);
-    var isML = extName === '.ml';
-    if (!isML) {
+    if (maybeSourceKind(unsanitizedPath, packageConfig) !== '.ml') {
       return '';
     }
     var base = upperBase(baseNameBase(unsanitizedPath));
@@ -380,34 +410,78 @@ var namespaceFilePath = function(packageConfig, absPath) {
   return path.resolve(absPath, '..', namespacedBase);
 };
 
+/**
+ * To compile many files at once, with extensions, we have to continuously tell the
+ * compiler that each interface file should be treated as an interface file, even if
+ * it's an .mli. Once you pass -intf-suffix .bla, it *expects* every interface to be
+ * .blah from that point on, so we have to reset it to .mli each time we see a .mli.
+ */
+var getSingleFileCompileExtensionFlags = function(filePath, packageConfig) {
+  var extName = path.extname(filePath);
+  var kind = maybeSourceKind(filePath, packageConfig);
+  if (extName !== kind) {
+    var extensionFlags = [];
+    // Then uses some extension - find it.
+    var extensions = packageConfig.packageJSON.CommonML.extensions;
+    if (extensions) {
+      for (var i = 0; i < extensions.length; i++) {
+        var extension = extensions[i];
+        if (extension['interface'] === extName) {
+          extensionFlags = ['-intf-suffix', extName, '-intf'];
+        } else if (extension['implementation'] === extName) {
+          extensionFlags = ['-intf-suffix', extension['interface'], '-impl'];
+        }
+      }
+    }
+    if (extensionFlags.length === 0) {
+      invariant(false, 'Could not find extensions for ' + filePath);
+    }
+    return extensionFlags;
+  }
+  return kind === '.ml' ?
+    ['-intf-suffix', '.mli', '-impl'] :
+    ['-intf-suffix', '.mli'];
+};
+
+
+/**
+ * To make debugging individual compilations easier, or to integrate into IDEs,
+ * we can commute the `compileCommand` into each source file's compilation to
+ * spot when one compilation is failing, or to perform a faster incremental
+ * compile while in the editor.
+ */
 var getNamespacedFileOutputCommands = function(compileCommand, unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   return compileCommand + unsanitizedPaths.map(function(unsanitizedPath) {
     invariant(
-      isSourceFile(unsanitizedPath),
+      isSourceFile(unsanitizedPath, packageConfig),
       'Do not know what to do with :' + unsanitizedPath
     );
+    var extensionFlags = getSingleFileCompileExtensionFlags(unsanitizedPath, packageConfig);
     var sanitizedPath =
       sanitizedArtifact(unsanitizedPath, packageConfig, rootPackageConfig, buildConfig);
     var sanitizedNamespacedModule = namespaceFilePath(packageConfig, sanitizedPath);
     return [
       '-o',
       sanitizedNamespacedModule,
-      sanitizedPath
-    ].join(' ');
+    ].concat(extensionFlags)
+    .concat([sanitizedPath]).join(' ');
   }).join(' ');
 
 };
 
-var getCompileForDocsOutputCommands = function(compileCommand, unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
+var getCompileForDocsPreprocessedFileList = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   return unsanitizedPaths.map(function(unsanitizedPath) {
-    invariant(isSourceFile(unsanitizedPath), 'Do not know what to do with :' + unsanitizedPath);
+    invariant(isSourceFile(unsanitizedPath, packageConfig), 'Do not know what to do with :' + unsanitizedPath);
+    var extensionFlags = getSingleFileCompileExtensionFlags(unsanitizedPath, packageConfig);
     var sanitizedPath =
       sanitizedArtifactForDoc(unsanitizedPath, packageConfig, rootPackageConfig, buildConfig);
-    return [
-      compileCommand,
-      sanitizedPath
-    ].join(' ');
-  });
+    return extensionFlags
+      .concat([sanitizedPath]).join(' ');
+  }).join(' ');
+};
+
+var getCompileForDocsOutputCommands = function(compileCommand, unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
+  return compileCommand + getCompileForDocsPreprocessedFileList(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig);
 };
 
 /**
@@ -416,14 +490,11 @@ var getCompileForDocsOutputCommands = function(compileCommand, unsanitizedPaths,
  */
 var getModuleArtifacts = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   return unsanitizedPaths.map(function(unsanitizedPath) {
-    var extName = path.extname(unsanitizedPath);
-    var isML = extName === '.ml';
-    var isMLI = extName === '.mli';
-    if (!isSourceFile(unsanitizedPath)) {
+    if (!isSourceFile(unsanitizedPath, packageConfig)) {
       throw new Error('Do not know what to do with :' + unsanitizedPath);
     }
     var basename = path.basename(unsanitizedPath, path.extname(unsanitizedPath));
-    return isML ? sanitizedArtifact(
+    return maybeSourceKind(unsanitizedPath, packageConfig) === '.ml' ? sanitizedArtifact(
       path.resolve(unsanitizedPath, '..', namespaceLowercase(packageConfig, basename) + objectExtension(buildConfig)),
       packageConfig,
       rootPackageConfig,
@@ -436,17 +507,8 @@ var getModuleArtifacts = function(unsanitizedPaths, packageConfig, rootPackageCo
 var getSanitizedOutputDirs = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   var seen = {};
   return unsanitizedPaths.map(function(unsanitizedPath) {
-    var extName = path.extname(unsanitizedPath);
-    var isML = extName === '.ml';
-    var isMLI = extName === '.mli';
-    if (!isML && !isMLI) {
-      throw new Error('Do not know what to do with :' + unsanitizedPath);
-    }
-    var unsanitizedArtifact =
-      isML ? unsanitizedPath.replace('.ml', objectExtension(buildConfig)) :
-      isMLI ? unsanitizedPath.replace('.mli', '.cmi') : 'NEVER_HAPPENS';
     var sanitized =
-      sanitizedArtifact(unsanitizedArtifact, packageConfig, rootPackageConfig, buildConfig);
+      sanitizedArtifact(buildArtifact(unsanitizedPath, buildConfig, rootPackageConfig), packageConfig, rootPackageConfig, buildConfig);
     var dirName = path.dirname(sanitized);
     if (seen[dirName]) {
       return null;
@@ -459,17 +521,8 @@ var getSanitizedOutputDirs = function(unsanitizedPaths, packageConfig, rootPacka
 var getSanitizedOutputDirsForDoc = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   var seen = {};
   return unsanitizedPaths.map(function(unsanitizedPath) {
-    var extName = path.extname(unsanitizedPath);
-    var isML = extName === '.ml';
-    var isMLI = extName === '.mli';
-    if (!isML && !isMLI) {
-      throw new Error('Do not know what to do with :' + unsanitizedPath);
-    }
-    var unsanitizedArtifact =
-      isML ? unsanitizedPath.replace('.ml', objectExtension(buildConfig)) :
-      isMLI ? unsanitizedPath.replace('.mli', '.cmi') : 'NEVER_HAPPENS';
     var sanitized =
-      sanitizedArtifactForDoc(unsanitizedArtifact, packageConfig, rootPackageConfig, buildConfig);
+      sanitizedArtifactForDoc(buildArtifact(unsanitizedPath, buildConfig, rootPackageConfig), packageConfig, rootPackageConfig, buildConfig);
     var dirName = path.dirname(sanitized);
     if (seen[dirName]) {
       return null;
@@ -546,7 +599,8 @@ var verifyPackageConfig = function(packageConfig) {
   for (var i = 0; i < sourceFiles.length; i++) {
     var sourceFile = sourceFiles[i];
     var extName = path.extname(sourceFile);
-    if (extName === '.mli' || extName === '.ml') {
+    var kind = maybeSourceKind(sourceFile, packageConfig);
+    if (kind === '.mli' || kind === '.ml') {
       // Chop off any potential 'ml'
       var basenameBase = path.basename(sourceFile, extName);
       invariant(
@@ -591,6 +645,22 @@ var verifyPackageConfig = function(packageConfig) {
       msg + 'Cannot export the same module name as the package name:' + exportName
     );
   });
+
+  var extensions = packageConfig.packageJSON.CommonML.extensions;
+  if (CommonML.extensions) {
+    for (var i = 0; i < extensions && extensions.length; i++) {
+      var extension = extensions[i];
+      invariant(
+        extension['interface'] && extension['implementation'],
+        packageName + ' has misformed extensions'
+      );
+      invariant(
+        extension['interface'].charAt(0) === '.' && extension['implementation'].charAt(0) === '.',
+        packageName + ' has extensions that do not start with a (.) - ' +
+        'extensions should look like [{"intf": ".blai", "impl": ".bla"}]'
+      );
+    }
+  }
 };
 
 var generateDotMerlinForPackage = function(autoGenAliases, moduleArtifacts, rootPackageConfig, packageConfig, buildConfig) {
@@ -844,6 +914,42 @@ var sanitizedImmediateDependenciesPublicPaths = function(packageConfig, rootPack
   return immediateDependenciesPublicDirs;
 };
 
+/**
+ * Flags for compiling (but not linking).
+ */
+var getSingleFileCompileFlags = function(packageConfig, annot) {
+  var compileFlags = packageConfig.packageJSON.CommonML.compileFlags || [];
+  var preprocessor = packageConfig.packageJSON.CommonML.preprocessor;
+  return compileFlags.concat([
+    '-c',
+    annot ? '-bin-annot' : '',
+    preprocessor ? '-pp ' + preprocessor : ''
+  ]);
+};
+
+
+var getOCamldepFlags = function(packageConfig) {
+  var extensions = packageConfig.packageJSON.CommonML.extensions;
+  var extensionFlags = !extensions ? [] : extensions.map(function(exn) {
+    return " -ml-synonym " + exn['implementation'] + " -mli-synonym " + exn['interface'] + ' ';
+  });
+  // The packageConfig's sourceFiles contains all files in `src` since it wasn't possible to know how to filter out non-source files until the package.json was found and parsed as part of the same source scanning process.
+  var sourceFileArgs = packageConfig.packageResources.sourceFiles.map(function(sourceFile) {
+    if (!isSourceFile(sourceFile, packageConfig)) {
+      return '';
+    }
+    var kind = maybeSourceKind(sourceFile, packageConfig);
+    return kind === '.ml' ? ' -impl ' + sourceFile : ' -intf ' + sourceFile;
+  });
+  var ppFlags = packageConfig.packageJSON.CommonML.preprocessor ? [
+    '-pp ' + packageConfig.packageJSON.CommonML.preprocessor
+  ] : [];
+
+  return ['-sort', '-one-line']
+    .concat(extensionFlags)
+    .concat(ppFlags)
+    .concat(sourceFileArgs);
+};
 var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildConfig, walkResults) {
   var ret = [];
   var prevTransitiveArtifacts = [];
@@ -909,10 +1015,6 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       buildConfig
     );
 
-    var allCompilerFlags = [
-      '-c',
-    ].concat(compileFlags);
-
     var fileOutputDirs = getSanitizedOutputDirs(
       ocamldepOrderedSourceFiles,
       packageConfig,
@@ -929,6 +1031,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       rootPackageConfig,
       buildConfig
     );
+    var singleFileCompileFlags = getSingleFileCompileFlags(packageConfig, true);
 
     var searchPaths = makeSearchPathStrings(
       prevTransitiveArtifacts.map(path.dirname.bind(path))
@@ -942,7 +1045,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
 
     var singleFileCompile =
       [compileCommand]
-      .concat(allCompilerFlags)
+      .concat(singleFileCompileFlags)
       .concat(searchPaths)
       .concat(['-bin-annot -open', autoGenAliases.internalModuleName]).join(' ') + ' ';
 
@@ -1032,12 +1135,20 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
 
     var singleFileCompileForDocs =
       [compileCommand]
-      .concat(allCompilerFlags)
+      .concat(singleFileCompileFlags)
       .concat(searchPathsForDocs)
-      .concat(['-bin-annot']).join(' ');
+      .concat(['-bin-annot']).join(' ') + ' ';
 
     var compileNonNamespacedModulesForDocsCommands = getCompileForDocsOutputCommands(
       singleFileCompileForDocs,
+      sourceFilesToRecompile,
+      packageConfig,
+      rootPackageConfig,
+      buildConfig
+    );
+
+    // The same as compileNonNamespacedModulesForDocsCommands but just the file list
+    var nonNamespacedFileListForDocs = getCompileForDocsPreprocessedFileList(
       sourceFilesToRecompile,
       packageConfig,
       rootPackageConfig,
@@ -1048,7 +1159,8 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       [findlibDocCommand]
       .concat(searchPathsForDocs)
       .concat(allDocFlags)
-      .concat(sourceFilesToRecompile)
+      .concat(commonML.preprocessor ? ['-pp', commonML.preprocessor] : [])
+      .concat(nonNamespacedFileListForDocs)
       .concat(['-d', docArtifact])
       .concat(['-css-style', STYLE])
       .join(' ');
@@ -1064,8 +1176,8 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     // get the .cmos.
     var justTheModuleArtifacts =
       getModuleArtifacts(ocamldepOrderedSourceFiles, packageConfig, rootPackageConfig, buildConfig);
-    prevTransitiveArtifacts.push(buildArtifact(autoGenAliases.genSourceFiles.externalImplementation, buildConfig));
-    prevTransitiveArtifacts.push(buildArtifact(autoGenAliases.genSourceFiles.internalImplementation, buildConfig));
+    prevTransitiveArtifacts.push(buildArtifact(autoGenAliases.genSourceFiles.externalImplementation, buildConfig, packageConfig));
+    prevTransitiveArtifacts.push(buildArtifact(autoGenAliases.genSourceFiles.internalImplementation, buildConfig, packageConfig));
     prevTransitiveArtifacts.push.apply(prevTransitiveArtifacts, justTheModuleArtifacts);
     // The root package should be runable
     var findlibLinkCommand = getFindlibCommand(packageConfig, buildConfig.buildCommand, true);
@@ -1079,7 +1191,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
 
 
     var compileCommands =
-      (mightNeedSomething && needsModuleRecompiles ? [compileAliasesCommand].concat(compileModulesCommands) : [])
+      (mightNeedSomething && needsModuleRecompiles ? [compileAliasesCommand].concat([compileModulesCommands]) : [])
       .concat(mightNeedSomething && executableArtifact ? [compileExecutableCommand] : []);
 
     var compileModulesMsg =
@@ -1110,7 +1222,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     var docCommandMsg = [
       'echo "> Generating documentation:"',
       'echo " > Generating dedicated build just for docs:"',
-      'echo " > ' + compileNonNamespacedModulesForDocsCommands.join('\n') + '"',
+      'echo " > ' + compileNonNamespacedModulesForDocsCommands + '"',
       'echo " > ' + compileActualDocumentationCommand + '"'
     ].join('\n');
 
@@ -1128,7 +1240,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     buildConfig.doc && buildDocScriptForThisPackage.push(ensureDirectoryCommandForDoc);
     buildConfig.doc && buildDocScriptForThisPackage.push(ensureDirectoriesCommandForDocIntermediateBuilds);
     buildConfig.doc && buildDocScriptForThisPackage.push.apply(buildDocScriptForThisPackage, fileCopyCommandsForDoc);
-    buildConfig.doc && buildDocScriptForThisPackage.push.apply(buildDocScriptForThisPackage, compileNonNamespacedModulesForDocsCommands);
+    buildConfig.doc && buildDocScriptForThisPackage.push(compileNonNamespacedModulesForDocsCommands);
     buildConfig.doc && buildDocScriptForThisPackage.push(compileActualDocumentationCommand);
     buildConfig.doc && buildDocScriptForThisPackage.push(echoDocLocationCommand);
     someDependentProjectNeededRecompilation = mightNeedSomething;
@@ -1175,7 +1287,7 @@ function getPackageResources(absRootDir) {
         dirRealPath
       ].join(' '));
       directories.push(absPath);
-    } else if (isSourceFile(absPath)) {
+    } else if (true /*isSourceFile(absPath, packageConfig */) {
       sourceFiles.push(absPath);
       sourceFileMTimes.push(stats.mtime.getTime());
     }
@@ -1509,10 +1621,10 @@ function buildTree(tree) {
       };
       var findlibOCamldepCommand = getFindlibCommand(packageConfig, OCAMLDEP, false);
       log('> Computing dependencies for ' + packageConfig.packageName + '\n\n');
+      var preprocessor = packageConfig.packageJSON.CommonML.preprocessor;
       var cmd =
         [findlibOCamldepCommand]
-        .concat(['-sort', '-one-line'].join(' '))
-        .concat(packageResources.sourceFiles)
+        .concat(getOCamldepFlags(packageConfig))
         .join(' ');
       log(cmd);
       var scripts = [{
