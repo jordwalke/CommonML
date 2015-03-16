@@ -337,6 +337,37 @@ Which module is the root of the executable? `CommonML`'s build script
 automatically determines this by way of using `ocamldep` behind the scenes. In
 short, it's whichever one does not have any other dependencies.
 
+
+
+Preprocessors:
+==================
+
+You may supply a custom preprocessor program that should be executed on each
+file in order to parse the source into a canonical AST. The preprocessor must be
+available in your `PATH` and be able to accept an arbitrary file, and either
+invoke a custom parser, or invoke the standard parser. Your preprocessor likely
+would use file extensions as "hints" as to which to do.
+
+Therefore, `CommonML` also allows you to indicate that particular "pairs" of
+extensions should be treated as interfaces/implementations respectively -
+otherwise the file extension "hints" that are used by your preprocessor will
+confuse the rest of the compilation toolchain.
+
+You will often want to supply both a preprocessor *and* extensions. Below is an
+example of doing both, by populating the `preprocessor` and `extensions` fields
+in a `package.json`'s `CommonML` field:
+
+      "CommonML": {
+        "exports": ["MyProjectMod"],
+        "preprocessor": "myCustomPreprocessor",
+        "extensions": [{
+          "interface": ".heyoi",
+          "implementation": ".heyo"
+        }],
+
+The `preprocessor` and `extensions` fields are separate concepts that are often
+used simultaneously.
+
 TODO:
 =====
 
