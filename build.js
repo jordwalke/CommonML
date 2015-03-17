@@ -614,6 +614,24 @@ var upperBasenameBase = function(filePath) {
   return base[0].toUpperCase() + base.substr(1);
 };
 
+var ensureNotMisCase = function(packageName, validateThis, propperCases) {
+  var lowercaseVersionOfPropper = {};
+  for (var key in propperCases) {
+    lowercaseVersionOfPropper[key.toLowerCase()] = true;
+  }
+  for (var keyInQuestion in validateThis) {
+    if (lowercaseVersionOfPropper[keyInQuestion.toLowerCase()] &&
+        !(keyInQuestion in propperCases)) {
+      invariant(
+        false,
+        packageName +
+          ' has a mispelled field in its package.json/CommonML (check the casing of ' +
+          keyInQuestion + ').'
+      );
+    }
+  }
+};
+
 var verifyPackageConfig = function(packageConfig) {
   var realPath = packageConfig.realPath;
   var packageName = packageConfig.packageName;
@@ -640,6 +658,26 @@ var verifyPackageConfig = function(packageConfig) {
         '(' + sourceFile + ')'
       );
     }
+  }
+
+  ensureNotMisCase(packageName, CommonML, {
+    exports: true,
+    compileFlags: true,
+    linkFlags: true,
+    jsHtmlPage: true,
+    docFlags: true,
+    extensions: true,
+    preprocessor: true,
+    findlibPackages: true
+  });
+
+  var htmlPage = CommonML.jsHtmlPage;
+  if (htmlPage) {
+    invariant(typeof htmlPage === 'string', packageName + ' htmlPage field must be a string');
+    invariant(
+      htmlPage.charAt(0) !== '/' && htmlPage.charAt(0) !== '.',
+      packageName + ' htmlPage must be relative to the package root with no leading slash or dot'
+    );
   }
 
   invariant(packageConfig.realPath, msg + 'No path for package.');
@@ -1241,9 +1279,11 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
         '-o',
         jsArtifact
       ].join(' ');
+    var jsHtmlPage = packageConfig.packageJSON.CommonML.jsHtmlPage;
     var buildPageArtifactCommand = shouldCompileExecutableIntoJS && [
         'cp',
-        PAGE_TEMPLATE,
+        jsHtmlPage ? path.join(packageConfig.realPath, jsHtmlPage) :
+          PAGE_TEMPLATE,
         pageArtifact,
       ].join(' ');
 
