@@ -252,7 +252,7 @@ Compatibility:
 Why NPM?:
 --------
 
-  1. npm (command line tool, that CommonML uses) is *not* npm.org (service).
+  1. npm (command line tool, that CommonML uses) is *not* npmjs.com (service).
   2. npm (command line tool) is merely a way to organize and install dependencies - it has nothing to do with JS.
   3. npm do not depend on any central repository and is extremely popular.
   4. npm (and therefore CommonML) can work entirely based on github repos.
