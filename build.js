@@ -1222,17 +1222,16 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       .concat(prevTransitiveArtifacts)
       .join(' ');
 
-    var jsArtifact =
-      buildConfig.buildJS && executableArtifact ?
+    // Can only build the top level packages.
+    var shouldCompileExecutableIntoJS = buildConfig.buildJS && executableArtifact;
+    var jsArtifact = shouldCompileExecutableIntoJS ?
         buildForJS(packageConfig, rootPackageConfig, buildConfig) : null;
-    var mapArtifact =
-      buildConfig.buildJS && executableArtifact ?
+    var mapArtifact = shouldCompileExecutableIntoJS ?
         buildForMap(packageConfig, rootPackageConfig, buildConfig) : null;
-    var pageArtifact =
-      buildConfig.buildJS && executableArtifact ?
+    var pageArtifact = shouldCompileExecutableIntoJS ?
         buildForHTML(packageConfig, rootPackageConfig, buildConfig) : null;
 
-    var buildJSArtifactCommand = buildConfig.buildJS && [
+    var buildJSArtifactCommand = shouldCompileExecutableIntoJS && [
         'js_of_ocaml',
         '--source-map',
         '--debug-info',
@@ -1242,7 +1241,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
         '-o',
         jsArtifact
       ].join(' ');
-    var buildPageArtifactCommand = buildConfig.buildJS && [
+    var buildPageArtifactCommand = shouldCompileExecutableIntoJS && [
         'cp',
         PAGE_TEMPLATE,
         pageArtifact,
@@ -1251,11 +1250,15 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     var echoJSMessage = [
       'echo ""',
       'echo " > JavaScript Package at: ' + jsArtifact + '"',
-      'echo " > Open this page in Chrome: file:\/\/' + pageArtifact + '"',
-      'echo " > Open the dev tools, *then* refresh the page to debug and see source maps."'
+      'echo " > Open this page in Chrome, open the dev tools, *then* refresh."',
+      'echo " > You will see source maps and be able to set break points."',
+      'echo " >"',
+      'echo " >"',
+      'echo " >         file:\/\/' + pageArtifact + '"',
+      'echo " >"'
     ].join('\n');
 
-    var buildJSCommands = buildConfig.buildJS ? [
+    var buildJSCommands = shouldCompileExecutableIntoJS ? [
       buildJSArtifactCommand,
       buildPageArtifactCommand,
       echoJSMessage,
@@ -1265,7 +1268,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     var compileCommands =
       (mightNeedSomething && needsModuleRecompiles ? [compileAliasesCommand].concat([compileModulesCommands]) : [])
       .concat(mightNeedSomething && executableArtifact ? [compileExecutableCommand] : [])
-      .concat(buildConfig.buildJS ? [buildJSCommands] : []);
+      .concat(shouldCompileExecutableIntoJS ? [buildJSCommands] : []);
 
     var compileModulesMsg =
       sourceFilesToRecompile.length === 0 ?
