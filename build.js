@@ -471,7 +471,7 @@ var getSingleFileCompileExtensionFlags = function(filePath, packageConfig) {
   }
   return kind === '.ml' ?
     ['-intf-suffix', '.mli', '-impl'] :
-    ['-intf-suffix', '.mli'];
+    ['-intf-suffix', '.mli', '-intf'];
 };
 
 
@@ -1137,6 +1137,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       // actually compiled the namespaced modules yet. They are like forward
       // declarations in that sense.
       .concat(['-bin-annot -no-alias-deps -w -49'])
+      .concat(['-c'])
       .concat(searchPaths)
       .concat([
         autoGenAliases.genSourceFiles.internalInterface,
