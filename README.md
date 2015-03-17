@@ -128,7 +128,6 @@ any other `npm` dependencies.
 2. Now your `package.json` looks like Figure 1 below.
 3. Rerun `npm install`. This installs all dependencies into `node_modules`.
 4. Now your package's source files can simply refer to `SomeOtherPackage.TheirExportedModules.blah`.
-5. 
 
 
 
@@ -159,32 +158,86 @@ If two packages depend on *compatible* versions of the same module, then `npm de
 Build Parameters:
 -----------------
 
-*Build bytecode:*
-
-    node node_modules/CommonML/build.js --command=ocamlc     # To compile native binaries
-
-
-*Build native binaries:*
-
-    node node_modules/CommonML/build.js --command=ocamlopt   # To compile to bytecode
+Dedicated build directories (with their own resource caches) are created for
+each build flag combination. For example, if you build a root project
+`YourProject` "for debugging", with `ocamlopt`, then the resulting binary is
+placed at `RootOfYourProject/_build_ocamlopt_debug/YourProject/yourProject.out`
+and intermediate build artifacts for dependencies are placed at
+`RootOfYourProject/_build_ocamlopt_debug/ADependency/...`.
 
 
-*Build beautiful docs:*
+*Build bytecode (default):(From `YourProject` root)*
+
+    node node_modules/CommonML/build.js --compiler=ocamlc # To compile bytecode
+
+    # Then run
+    ./_build_ocamlc/YourProject/yourProject.out
+
+
+*Build native binaries:(From `YourProject` root)*
+
+    node node_modules/CommonML/build.js --compiler=ocamlopt # To compile to native binaries
+
+    # Then run
+    ./_build_ocamlopt/YourProject/yourProject.out
+
+
+*Build beautiful docs:(From `YourProject` root)*
 
     # Add the [--doc] command to any build command
     # valid options are `html`, `latex`, `texi`, `man`, `dot`.
     # Recursively builds documentation for all dependencies as well.
-    node node_modules/CommonML/build.js --command=ocamlc --doc=html
+    node node_modules/CommonML/build.js --compiler=ocamlc --doc=html
     open _build/YourProject/yourProject.doc/index.html
 
 
-*To enable stack traces:*
+*To enable stack traces:(From `YourProject` root)*
 
+    # Your binary and dependencies must be compiled with --forDebug
+    node node_modules/CommonML/build.js --forDebug=true
+    # You must have a runtime parameter set
     export OCAMLRUNPARAM='b'
+    # Execute the binary that was built into the dedicated directory
+    ./_build_blah_blah/YourProject/yourProject.out
+
+
+*Build JavaScript With Sourcemaps:(From `YourProject` root)*
+
+    # Building JavaScript is a special case of building for debug, and building
+    # for bytecode (a final step converts the bytecode to JavaScript).
+    # Ensure you have `js_of_ocaml` installed and available on your PATH.
+    # Install via `opam install js_of_ocaml`.
+    node node_modules/CommonML/build.js --forDebug=true --buildJS=true
+    # open the test page
+
+    # Then run
+    open ./_build_ocamlc/YourProject/yourProject.html
 
 *To show parsing errors :*
 
     export OCAMLRUNPARAM='p'
+
+Integrating With JavaScript:
+----------------------------
+
+When you build for JavaScript `--forDebug=true --buildJS=true`, you are simply
+compiling into JS. This doesn't give you the ability to do anything except
+print output. To actually interface with the containing JavaScript environment,
+you'll need to not only *compile* using `js_of_ocaml`, but also use the
+`js_of_ocaml` runtime libraries which should be compiled into JavaScript along
+with your application code. To ensure that it is included, and linked, add
+`js_of_ocaml` to your `package.json` file's `CommonML.findlibPackages` field.
+(There's also a syntax extension available to make interacting with JavaScript
+more sugary).
+
+  "CommonML": {
+    "findlibPackages": [{"dependency": "js_of_ocaml"}],
+
+
+TODO: `js_of_ocaml` should itself be turned into a `CommonML` dependency to
+remove any need to use the `findlibPackages` field (it's confusing that we even
+have the notion of "findlib packages") and `package.json` is fully sufficient
+to do everything we need. This is only temporary.
 
 Compatibility:
 -------------

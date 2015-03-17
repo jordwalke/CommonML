@@ -5,10 +5,12 @@ var path = require('path');
 var args = process.argv;
 var optimist = require('optimist');
 var clc = require('cli-color');
+var whereis = require('whereis');
 
 var argv = optimist.argv;
 
 var STYLE = path.join(__dirname, 'docGenerator', 'docStyle.css');
+var PAGE_TEMPLATE = path.join(__dirname, 'jsGenerator', 'app.html');
 
 
 var cliConfig = {
@@ -17,7 +19,7 @@ var cliConfig = {
 };
 
 var buildUniquenessString = function(buildConfig) {
-  return '_' + buildConfig.buildCommand + (buildConfig.forDebug ? '_debug' : '');
+  return '_' + buildConfig.compiler + (buildConfig.forDebug ? '_debug' : '');
 };
 
 var actualBuildDir = function(buildConfig) {
@@ -29,10 +31,11 @@ var actualBuildDirForDocs = function(buildConfig) {
 };
 
 var buildConfig = {
-  buildCommand: argv.command || 'ocamlc',
+  compiler: argv.compiler || 'ocamlc',
   buildDir: argv.buildDir || '_build',
   doc: argv.doc || false,
   forDebug: argv.forDebug === 'true',
+  buildJS: argv.buildJS === 'true',
 };
 
 function invariant(bool, msg) {
@@ -41,12 +44,27 @@ function invariant(bool, msg) {
   }
 }
 invariant(
-  !('forDebug' in argv) || argv.forDebug === 'true' || argv.forDebug === false
+  !('forDebug' in argv) || argv.forDebug === 'true' || argv.forDebug === 'false'
 );
 invariant(
-  buildConfig.buildCommand === 'ocamlc' ||
-  buildConfig.buildCommand === 'ocamlopt',
-  'Must supply either --command=ocamlc or --command=ocamlopt'
+  buildConfig.forDebug || !buildConfig.buildJS,
+  'Building for JS also requires building for debug. ' +
+  'Supply --forDebug=true --buildJS=true'
+);
+
+invariant(
+  !('buildJS' in argv) || (argv.buildJS === 'true' || argv.buildJS === 'false'),
+  'You must specify either true/false for option --buildJS'
+);
+
+invariant(
+  buildConfig.buildJS ? buildConfig.compiler === 'ocamlc' : true,
+  'Building for JS required the --compiler=ocamlc (which is the default)'
+);
+invariant(
+  buildConfig.compiler === 'ocamlc' ||
+  buildConfig.compiler === 'ocamlopt',
+  'Must supply either --compiler=ocamlc or --compiler=ocamlopt'
 );
 
 var VALID_DOCS = ['html', 'latex', 'texi', 'man', 'dot'];
@@ -87,7 +105,7 @@ var makeSearchPathStrings = function(arr) {
 };
 
 var objectExtension = function(buildConfig) {
-  if (buildConfig.buildCommand === 'ocamlopt') {
+  if (buildConfig.compiler === 'ocamlopt') {
     return '.cmx';
   } else {
     return '.cmo';
@@ -120,7 +138,7 @@ var logProgress = function() {
   console.log(msg.apply(msg, arguments));
 };
 
-var buildingMsg = '\nBuilding Root Package ' + CWD + ' [' + buildConfig.buildCommand + ']\n';
+var buildingMsg = '\nBuilding Root Package ' + CWD + ' [' + buildConfig.compiler + ']\n';
 logTitle(buildingMsg);
 
 
@@ -257,14 +275,27 @@ var buildForDoc = function(packageConfig, rootPackageConfig, buildConfig) {
 var buildForExecutable = function(packageConfig, rootPackageConfig, buildConfig) {
   var unsanitizedExecPath =
     path.join(packageConfig.realPath, lowerBase(packageConfig.packageName) + '.out');
-  var sanitizedExecPath = sanitizedArtifact(
-    unsanitizedExecPath,
-    packageConfig,
-    rootPackageConfig,
-    buildConfig
-  );
-  return sanitizedExecPath;
+  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
 };
+
+var buildForJS = function(packageConfig, rootPackageConfig, buildConfig) {
+  var unsanitizedExecPath =
+    path.join(packageConfig.realPath, 'app.js'); // Just hard coded for now
+  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
+};
+
+var buildForMap = function(packageConfig, rootPackageConfig, buildConfig) {
+  var unsanitizedExecPath =
+    path.join(packageConfig.realPath, 'app.map'); // Just hard coded for now
+  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
+};
+
+var buildForHTML = function(packageConfig, rootPackageConfig, buildConfig) {
+  var unsanitizedExecPath =
+    path.join(packageConfig.realPath, 'app.html'); // Just hard coded for now
+  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
+};
+
 
 var isExported = function(packageConfig, filePath) {
   return packageConfig.packageJSON.CommonML.exports.indexOf(upperBasenameBase(filePath)) !== -1;
@@ -751,6 +782,11 @@ var ocbFlagsForPackageCommand = function(command) {
     return ['-package', syntax, '-syntax', 'camlp4o'].join(' ');
   } else if (dep) {
     return ['-package', dep].join(' ');
+  } else {
+    invariant(
+      false,
+      'Findlib package has neither "dependency" nor "syntax" fields'
+    );
   }
 };
 
@@ -764,21 +800,13 @@ var getFindlibCommand = function(packageConfig, toolchainCommand, linkPkg) {
   var commonML = packageConfig.packageJSON.CommonML;
   var findlibPackages = commonML.findlibPackages;
   var hasFindlibPackages = findlibPackages && findlibPackages.length;
-  if (!hasFindlibPackages) {
-    return toolchainCommand;
-  }
   var findlibBuildCommand = OCAMLFIND + ' ' + toolchainCommand;
-
+  // It appears that using findlib is *faster* than not using it - but if you
+  // add several pacakges, then it's slower.
   var findlibFlags =
     hasFindlibPackages ?
-    findlibPackages.map(ocbFlagsForPackageCommand).join(' ') : '';
-
-  // We will be outputting to standard out *right now* on the fly, so we should
-  // notify that we are - This makes building messy in the console but only
-  // happens when using ocamlfind.
-  var echoMsg = "> Running ocamlfind to determine build command.\n" +
-    "Try to avoid use of findlibPackages, they make building messy and very slow.";
-  child_process.execSync('echo "' + echoMsg + '"');
+    findlibPackages.map(ocbFlagsForPackageCommand).join(' ') :
+    '';
 
   var findLib = [findlibBuildCommand, linkPkg ? '-linkpkg' : '', findlibFlags, '-only-show'].join(' ');
 
@@ -917,12 +945,13 @@ var sanitizedImmediateDependenciesPublicPaths = function(packageConfig, rootPack
 /**
  * Flags for compiling (but not linking).
  */
-var getSingleFileCompileFlags = function(packageConfig, annot) {
+var getSingleFileCompileFlags = function(packageConfig, buildConfig, annot) {
   var compileFlags = packageConfig.packageJSON.CommonML.compileFlags || [];
   var preprocessor = packageConfig.packageJSON.CommonML.preprocessor;
   return compileFlags.concat([
     '-c',
     annot ? '-bin-annot' : '',
+    buildConfig.forDebug ? '-g' : '',
     preprocessor ? '-pp ' + preprocessor : ''
   ]);
 };
@@ -950,6 +979,7 @@ var getOCamldepFlags = function(packageConfig) {
     .concat(ppFlags)
     .concat(sourceFileArgs);
 };
+
 var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildConfig, walkResults) {
   var ret = [];
   var prevTransitiveArtifacts = [];
@@ -1031,7 +1061,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       rootPackageConfig,
       buildConfig
     );
-    var singleFileCompileFlags = getSingleFileCompileFlags(packageConfig, true);
+    var singleFileCompileFlags = getSingleFileCompileFlags(packageConfig, buildConfig, true);
 
     var searchPaths = makeSearchPathStrings(
       prevTransitiveArtifacts.map(path.dirname.bind(path))
@@ -1041,7 +1071,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     );
 
     var compileCommand =
-      getFindlibCommand(packageConfig, buildConfig.buildCommand, false);
+      getFindlibCommand(packageConfig, buildConfig.compiler, false);
 
     var singleFileCompile =
       [compileCommand]
@@ -1089,15 +1119,17 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       buildForExecutable(packageConfig, rootPackageConfig, buildConfig) :
       null;
 
-
     // TODO: docs compilation
     // Make -g option per task not per project
     // Test ocamldebug
     // Fix compile output errors linking to `_build`
+    // TODO: Stop using computing the findlib command several times (once for
+    // doc [even if it's not used], and linking [even if it doesn't occur])
 
     /**
      * Documentation. Have to compile a special version without namespaces so
-     * that ocamldoc is not confused!
+     * that ocamldoc is not confused! Wait - why is ocamldoc confused? It
+     * appears to support both -open and -no-alias-deps.
      */
     var docArtifact = buildForDoc(packageConfig, rootPackageConfig, buildConfig);
     var findlibDocCommand = getFindlibCommand(packageConfig, OCAMLDOC, false);
@@ -1180,19 +1212,60 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     prevTransitiveArtifacts.push(buildArtifact(autoGenAliases.genSourceFiles.internalImplementation, buildConfig, packageConfig));
     prevTransitiveArtifacts.push.apply(prevTransitiveArtifacts, justTheModuleArtifacts);
     // The root package should be runable
-    var findlibLinkCommand = getFindlibCommand(packageConfig, buildConfig.buildCommand, true);
+    var findlibLinkCommand = getFindlibCommand(packageConfig, buildConfig.compiler, true);
     var compileExecutableCommand = !executableArtifact ? '' :
       [findlibLinkCommand]
       .concat(['-o', executableArtifact])
+      .concat(buildConfig.forDebug ? ['-g'] : [])
       .concat(linkFlags)
       .concat(searchPaths)
       .concat(prevTransitiveArtifacts)
       .join(' ');
 
+    var jsArtifact =
+      buildConfig.buildJS && executableArtifact ?
+        buildForJS(packageConfig, rootPackageConfig, buildConfig) : null;
+    var mapArtifact =
+      buildConfig.buildJS && executableArtifact ?
+        buildForMap(packageConfig, rootPackageConfig, buildConfig) : null;
+    var pageArtifact =
+      buildConfig.buildJS && executableArtifact ?
+        buildForHTML(packageConfig, rootPackageConfig, buildConfig) : null;
+
+    var buildJSArtifactCommand = buildConfig.buildJS && [
+        'js_of_ocaml',
+        '--source-map',
+        '--debug-info',
+        '--pretty',
+        '--noinline',
+        executableArtifact,
+        '-o',
+        jsArtifact
+      ].join(' ');
+    var buildPageArtifactCommand = buildConfig.buildJS && [
+        'cp',
+        PAGE_TEMPLATE,
+        pageArtifact,
+      ].join(' ');
+
+    var echoJSMessage = [
+      'echo ""',
+      'echo " > JavaScript Package at: ' + jsArtifact + '"',
+      'echo " > Open this page in Chrome: file:\/\/' + pageArtifact + '"',
+      'echo " > Open the dev tools, *then* refresh the page to debug and see source maps."'
+    ].join('\n');
+
+    var buildJSCommands = buildConfig.buildJS ? [
+      buildJSArtifactCommand,
+      buildPageArtifactCommand,
+      echoJSMessage,
+    ].join('\n') : null;
+
 
     var compileCommands =
       (mightNeedSomething && needsModuleRecompiles ? [compileAliasesCommand].concat([compileModulesCommands]) : [])
-      .concat(mightNeedSomething && executableArtifact ? [compileExecutableCommand] : []);
+      .concat(mightNeedSomething && executableArtifact ? [compileExecutableCommand] : [])
+      .concat(buildConfig.buildJS ? [buildJSCommands] : []);
 
     var compileModulesMsg =
       sourceFilesToRecompile.length === 0 ?
@@ -1544,9 +1617,12 @@ var getCommonMLChanged = function(resourceCache, packageConfig) {
   );
 };
 
+/**
+ * Might change (native) compilation to be more exact.
+ */
 var getBuildConfigMightChangeCompilation = function(resourceCache, buildConfig) {
   return !resourceCache.buildConfig ||
-    resourceCache.buildConfig.buildCommand !== buildConfig.buildCommand ||
+    resourceCache.buildConfig.compiler !== buildConfig.compiler ||
     resourceCache.buildConfig.forDebug !== buildConfig.forDebug;
 };
 
@@ -1704,22 +1780,40 @@ function buildTree(tree) {
 }
 
 var tree;
-try {
-  log('Scanning files from ' + CWD);
-  tree = getProjectPackageConfigTree(CWD);
+var whenVerifiedPath = function() {
   try {
-    verifyPackageConfig(tree);
+    log('Scanning files from ' + CWD);
+    tree = getProjectPackageConfigTree(CWD);
     try {
-      buildTree(tree);
+      verifyPackageConfig(tree);
+      try {
+        buildTree(tree);
+      } catch (e) {
+        logError('Dependencies scanned and verified, but failed to build');
+        logErrorException(e);
+      }
     } catch (e) {
-      logError('Dependencies scanned and verified, but failed to build');
+      logError('Some packages failed verification');
       logErrorException(e);
-    }
+      }
   } catch (e) {
-    logError('Some packages failed verification');
+    logError('Failure scanning files');
     logErrorException(e);
   }
-} catch (e) {
-  logError('Failure scanning files');
-  logErrorException(e);
+};
+
+if (buildConfig.buildJS) {
+  whereis('js_of_ocaml', function(err, path) {
+    if (err || !path) {
+      throw new Error(
+        'You have asked to compile to JavaScript ' +
+        'but the binary `js_of_ocaml` is not in your path. ' +
+        'You probably also want to add an item to your package.json\'s ' +
+        'CommonML "findlibPackages": [{"dependency": "js_of_ocaml"}]'
+      );
+    }
+    whenVerifiedPath();
+  });
+} else {
+  whenVerifiedPath();
 }
