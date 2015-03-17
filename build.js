@@ -35,7 +35,7 @@ var buildConfig = {
   buildDir: argv.buildDir || '_build',
   doc: argv.doc || false,
   forDebug: argv.forDebug === 'true',
-  buildJS: argv.buildJS === 'true',
+  jsCompile: argv.jsCompile === 'true',
 };
 
 function invariant(bool, msg) {
@@ -47,18 +47,18 @@ invariant(
   !('forDebug' in argv) || argv.forDebug === 'true' || argv.forDebug === 'false'
 );
 invariant(
-  buildConfig.forDebug || !buildConfig.buildJS,
+  buildConfig.forDebug || !buildConfig.jsCompile,
   'Building for JS also requires building for debug. ' +
-  'Supply --forDebug=true --buildJS=true'
+  'Supply --forDebug=true --jsCompile=true'
 );
 
 invariant(
-  !('buildJS' in argv) || (argv.buildJS === 'true' || argv.buildJS === 'false'),
-  'You must specify either true/false for option --buildJS'
+  !('jsCompile' in argv) || (argv.jsCompile === 'true' || argv.jsCompile === 'false'),
+  'You must specify either true/false for option --jsCompile'
 );
 
 invariant(
-  buildConfig.buildJS ? buildConfig.compiler === 'ocamlc' : true,
+  buildConfig.jsCompile ? buildConfig.compiler === 'ocamlc' : true,
   'Building for JS required the --compiler=ocamlc (which is the default)'
 );
 invariant(
@@ -1262,7 +1262,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       .join(' ');
 
     // Can only build the top level packages.
-    var shouldCompileExecutableIntoJS = buildConfig.buildJS && executableArtifact;
+    var shouldCompileExecutableIntoJS = buildConfig.jsCompile && executableArtifact;
     var jsArtifact = shouldCompileExecutableIntoJS ?
         buildForJS(packageConfig, rootPackageConfig, buildConfig) : null;
     var mapArtifact = shouldCompileExecutableIntoJS ?
@@ -1846,7 +1846,7 @@ var whenVerifiedPath = function() {
   }
 };
 
-if (buildConfig.buildJS) {
+if (buildConfig.jsCompile) {
   whereis('js_of_ocaml', function(err, path) {
     if (err || !path) {
       throw new Error(

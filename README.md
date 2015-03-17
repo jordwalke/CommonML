@@ -207,7 +207,7 @@ and intermediate build artifacts for dependencies are placed at
     # for bytecode (a final step converts the bytecode to JavaScript).
     # Ensure you have `js_of_ocaml` installed and available on your PATH.
     # Install via `opam install js_of_ocaml`.
-    node node_modules/CommonML/build.js --forDebug=true --buildJS=true
+    node node_modules/CommonML/build.js --forDebug=true --jsCompile=true
     # open the test page
 
     # Then run
@@ -220,15 +220,15 @@ and intermediate build artifacts for dependencies are placed at
 Integrating With JavaScript:
 ----------------------------
 
-When you build for JavaScript `--forDebug=true --buildJS=true`, you are simply
-compiling into JS. This doesn't give you the ability to do anything except
-print output. To actually interface with the containing JavaScript environment,
-you'll need to not only *compile* using `js_of_ocaml`, but also use the
-`js_of_ocaml` runtime libraries which should be compiled into JavaScript along
-with your application code. To ensure that it is included, and linked, add
-`js_of_ocaml` to your `package.json` file's `CommonML.findlibPackages` field.
-(There's also a syntax extension available to make interacting with JavaScript
-more sugary).
+When you build for JavaScript `--forDebug=true --jsCompile=true`, you are
+simply compiling into JS. This doesn't give you the ability to do anything
+except print output. To actually interface with the containing JavaScript
+environment, you'll need to not only *compile* using `js_of_ocaml`, but also
+use the `js_of_ocaml` runtime libraries which should be compiled into
+JavaScript along with your application code. To ensure that it is included, and
+linked, add `js_of_ocaml` to your `package.json` file's
+`CommonML.findlibPackages` field.  (There's also a syntax extension available
+to make interacting with JavaScript more sugary).
 
   "CommonML": {
     "findlibPackages": [{"dependency": "js_of_ocaml"}],
