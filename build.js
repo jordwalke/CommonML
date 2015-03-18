@@ -10,7 +10,7 @@ var whereis = require('whereis');
 var argv = optimist.argv;
 
 var STYLE = path.join(__dirname, 'docGenerator', 'docStyle.css');
-var PAGE_TEMPLATE = path.join(__dirname, 'jsGenerator', 'app.html');
+var PAGE_TEMPLATE_DIR = path.join(__dirname, 'jsGenerator');
 
 
 var cliConfig = {
@@ -278,25 +278,6 @@ var buildForExecutable = function(packageConfig, rootPackageConfig, buildConfig)
   return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
 };
 
-var buildForJS = function(packageConfig, rootPackageConfig, buildConfig) {
-  var unsanitizedExecPath =
-    path.join(packageConfig.realPath, 'app.js'); // Just hard coded for now
-  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
-};
-
-var buildForMap = function(packageConfig, rootPackageConfig, buildConfig) {
-  var unsanitizedExecPath =
-    path.join(packageConfig.realPath, 'app.map'); // Just hard coded for now
-  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
-};
-
-var buildForHTML = function(packageConfig, rootPackageConfig, buildConfig) {
-  var unsanitizedExecPath =
-    path.join(packageConfig.realPath, 'app.html'); // Just hard coded for now
-  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
-};
-
-
 var isExported = function(packageConfig, filePath) {
   return packageConfig.packageJSON.CommonML.exports.indexOf(upperBasenameBase(filePath)) !== -1;
 };
@@ -563,6 +544,9 @@ var getSanitizedOutputDirsForDoc = function(unsanitizedPaths, packageConfig, roo
   }).filter(function(o) {return o !== null;});
 };
 
+var entireActualBuildDir = function(rootPackageConfig, buildConfig) {
+  return path.resolve(rootPackageConfig.realPath, actualBuildDir(buildConfig));
+};
 
 /**
  * Artifacts start out in the failed build directory. The final step in
@@ -576,7 +560,7 @@ var getSanitizedOutputDirsForDoc = function(unsanitizedPaths, packageConfig, roo
  */
 var sanitizedDependencyBuildDirectory = function(packageConfig, rootPackageConfig, buildConfig) {
   return path.resolve(
-    path.resolve(rootPackageConfig.realPath, actualBuildDir(buildConfig)),
+    entireActualBuildDir(rootPackageConfig, buildConfig),
     packageConfig.packageName
   );
 };
@@ -664,19 +648,23 @@ var verifyPackageConfig = function(packageConfig) {
     exports: true,
     compileFlags: true,
     linkFlags: true,
-    jsHtmlPage: true,
+    jsResources: true,
     docFlags: true,
     extensions: true,
     preprocessor: true,
     findlibPackages: true
   });
 
-  var htmlPage = CommonML.jsHtmlPage;
+  var htmlPage = CommonML.jsResources;
   if (htmlPage) {
     invariant(typeof htmlPage === 'string', packageName + ' htmlPage field must be a string');
     invariant(
       htmlPage.charAt(0) !== '/' && htmlPage.charAt(0) !== '.',
       packageName + ' htmlPage must be relative to the package root with no leading slash or dot'
+    );
+    invariant(
+      htmlPage.charAt(htmlPage.length - 1) !== '/',
+      packageName + 'has a jsResources that ends with a slash. Remove the slash'
     );
   }
 
@@ -1261,32 +1249,55 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       .concat(prevTransitiveArtifacts)
       .join(' ');
 
-    // Can only build the top level packages.
+    // Can only build the top level packages into JS - ideally we'd also be
+    // able to dynamically link JS bundles..
     var shouldCompileExecutableIntoJS = buildConfig.jsCompile && executableArtifact;
-    var jsArtifact = shouldCompileExecutableIntoJS ?
-        buildForJS(packageConfig, rootPackageConfig, buildConfig) : null;
-    var mapArtifact = shouldCompileExecutableIntoJS ?
-        buildForMap(packageConfig, rootPackageConfig, buildConfig) : null;
-    var pageArtifact = shouldCompileExecutableIntoJS ?
-        buildForHTML(packageConfig, rootPackageConfig, buildConfig) : null;
+    var jsResourcesField = packageConfig.packageJSON.CommonML.jsResources;
+    var bundleDirToCopy = jsResourcesField ? path.join(packageConfig.realPath, jsResourcesField) : PAGE_TEMPLATE_DIR;
+    var copyBundleInto = shouldCompileExecutableIntoJS &&
+      entireActualBuildDir(rootPackageConfig, buildConfig) + '_js';
+    var ensureCopyBundleIntoDirCommand = ['mkdir', '-p', copyBundleInto].join(' ');
+    var jsArtifactRelativeForm = './app.js';
+    var jsArtifact = shouldCompileExecutableIntoJS ?  path.join(copyBundleInto, 'app.js') : null;
 
+    var symlinkIsInDir = shouldCompileExecutableIntoJS &&
+      path.resolve(path.join(copyBundleInto, entireActualBuildDir(rootPackageConfig, buildConfig), '..'));
+    var symlinkIsCalled = shouldCompileExecutableIntoJS &&
+      path.basename(entireActualBuildDir(rootPackageConfig, buildConfig));
+    var symlinkPath = shouldCompileExecutableIntoJS && path.join(symlinkIsInDir, symlinkIsCalled);
+    var makeFakeSymlinkDirectoryStructureCommand = shouldCompileExecutableIntoJS && [
+      'mkdir',
+      '-p',
+      symlinkIsInDir
+    ].join(' ');
+    // If rebuilding, trying to ln to an already linked file is an error! Unix
+    // commands are the worst. So we must first touch it, then unlink it before
+    // we try to link it.
+    var touchSymlinkCommand = shouldCompileExecutableIntoJS && ['touch', symlinkPath].join(' ');
+    var unlinkCommand = shouldCompileExecutableIntoJS && ['unlink', symlinkPath].join(' ');
+    var symlinkSourceMapsCommand = shouldCompileExecutableIntoJS && [
+      'ln',
+      '-s',
+      entireActualBuildDir(rootPackageConfig, buildConfig),
+      path.join(symlinkIsInDir, symlinkIsCalled)
+    ].join(' ');
+
+    // The cp command is such a broken API - there isn't a way to overwrite
+    // an entire directory.
+    var copyBundleDirCommand =
+      shouldCompileExecutableIntoJS && ['cp -r', bundleDirToCopy + '/*', copyBundleInto].join(' ');
+    // Change into the root directory so that source maps are w.r.t. correct location.
+    var changeDir = shouldCompileExecutableIntoJS && ['cd', copyBundleInto ].join(' ');
     var buildJSArtifactCommand = shouldCompileExecutableIntoJS && [
-        'js_of_ocaml',
-        '--source-map',
-        '--debug-info',
-        '--pretty',
-        '--noinline',
-        executableArtifact,
-        '-o',
-        jsArtifact
-      ].join(' ');
-    var jsHtmlPage = packageConfig.packageJSON.CommonML.jsHtmlPage;
-    var buildPageArtifactCommand = shouldCompileExecutableIntoJS && [
-        'cp',
-        jsHtmlPage ? path.join(packageConfig.realPath, jsHtmlPage) :
-          PAGE_TEMPLATE,
-        pageArtifact,
-      ].join(' ');
+      'js_of_ocaml',
+      '--source-map',
+      '--debug-info',
+      '--pretty',
+      '--noinline',
+      executableArtifact,
+      '-o',
+      jsArtifactRelativeForm
+    ].join(' ');
 
     var echoJSMessage = [
       'echo ""',
@@ -1295,21 +1306,37 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       'echo " > You will see source maps and be able to set break points."',
       'echo " >"',
       'echo " >"',
-      'echo " >         file:\/\/' + pageArtifact + '"',
+      'echo " >         Serving:"',
+      'echo " >         file:\/\/' + copyBundleInto + '/index.html "',
+      'echo " >"',
+      'echo " >         At:"',
+      'echo " >         http:\/\/localhost:8000\/index.html "',
       'echo " >"'
     ].join('\n');
 
     var buildJSCommands = shouldCompileExecutableIntoJS ? [
+      // makeBackupDir,
+      // moveOldBundleDirCommand,
+      ensureCopyBundleIntoDirCommand,
+      copyBundleDirCommand,
+      changeDir,
       buildJSArtifactCommand,
-      buildPageArtifactCommand,
       echoJSMessage,
+      makeFakeSymlinkDirectoryStructureCommand,
+      touchSymlinkCommand,
+      unlinkCommand,
+      symlinkSourceMapsCommand
+    ].join('\n') : null;
+
+    var startServer = shouldCompileExecutableIntoJS ? [
+      'pushd ' + copyBundleInto + ' && python -m SimpleHTTPServer || popd'
     ].join('\n') : null;
 
 
     var compileCommands =
       (mightNeedSomething && needsModuleRecompiles ? [compileAliasesCommand].concat([compileModulesCommands]) : [])
       .concat(mightNeedSomething && executableArtifact ? [compileExecutableCommand] : [])
-      .concat(shouldCompileExecutableIntoJS ? [buildJSCommands] : []);
+      .concat(shouldCompileExecutableIntoJS ? [buildJSCommands, startServer] : []);
 
     var compileModulesMsg =
       sourceFilesToRecompile.length === 0 ?
