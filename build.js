@@ -1293,6 +1293,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       '--source-map',
       '--debug-info',
       '--pretty',
+      '--linkall',
       '--noinline',
       executableArtifact,
       '-o',
@@ -1378,8 +1379,10 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     buildScriptForThisPackage.push(autoGenAliases.generateCommands);
     buildScriptForThisPackage.push.apply(buildScriptForThisPackage, fileCopyCommands);
     buildScriptForThisPackage.push(compileCmdMsg);
-    buildScriptForThisPackage.push.apply(buildScriptForThisPackage, compileCommands);
     buildScriptForThisPackage.push(merlinCommand);
+    // The compileCommands should be last just in case we're running the JS
+    // compilation mode which spins up a killable server as the last step.
+    buildScriptForThisPackage.push.apply(buildScriptForThisPackage, compileCommands);
     buildConfig.doc && buildDocScriptForThisPackage.push(docCommandMsg);
     buildConfig.doc && buildDocScriptForThisPackage.push(ensureDirectoryCommandForDoc);
     buildConfig.doc && buildDocScriptForThisPackage.push(ensureDirectoriesCommandForDocIntermediateBuilds);
