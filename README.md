@@ -205,13 +205,14 @@ and intermediate build artifacts for dependencies are placed at
 
 *Build JavaScript With Sourcemaps:(From `YourProject` root)*
 
-    >> If you have feedback about the actual debugging experience with source
-    >> maps (breakpoints, stepping through etc), please file issues on the
-    >> `js_of_ocaml` github page. Include screenshots, screencasts or detailed
-    >> descriptions of how the debugging experience can be made intuitive and
-    >> more similar to debugging JS.
-    >>
-    >>     https://github.com/ocsigen/js_of_ocaml/issues
+>> If you have feedback about the actual debugging experience with source maps
+>> (breakpoints, stepping through etc), please file issues on the `js_of_ocaml`
+>> github page. Include screenshots, screencasts or detailed descriptions of
+>> how the debugging experience can be made intuitive and more similar to
+>> debugging JS.
+>>
+>>     https://github.com/ocsigen/js_of_ocaml/issues
+
 
     # Building JavaScript is a special case of building for debug, and building
     # for bytecode (a final step converts the bytecode to JavaScript).
@@ -223,47 +224,48 @@ and intermediate build artifacts for dependencies are placed at
     # Then run
     open ./_build_ocamlc/YourProject/yourProject.html
 
-    For now, the build configuration is set to be the slowest execution, but
-    the most debuggable (with source maps).
 
-    TODO: The `--forDebug` flag should be examined to determine if the
-    optimized js compilation should be used (and source maps omitted).
+For now, the build configuration is set to be the slowest execution, but the
+most debuggable (with source maps).
 
-    `--jsCompile` will generate two artifacts: The symlink (`jsBuild`) to the
-    actual js bundle and source maps and a fake directory structure to get
-    source maps to work when served from a web server.
+TODO: The `--forDebug` flag should be examined to determine if the
+optimized js compilation should be used (and source maps omitted).
 
-    When running a build from a package root, you're choosing that package to
-    be "the executable" that is being built. That package root's package.json's
-    `CommonML.jsPlaceBuildArtifactsIn` field will determine where the js build
-    artifacts will be placed. It is considered relative to the package root of
-    the package that you're running the build command for.  If not specified,
-    it will just be placed in that package root directly.
+`--jsCompile` will generate two artifacts: The symlink (`jsBuild`) to the
+actual js bundle and source maps and a fake directory structure to get
+source maps to work when served from a web server.
 
-    Wherever those js build artifacts are placed is considered your "web server
-    root".
+When running a build from a package root, you're choosing that package to
+be "the executable" that is being built. That package root's package.json's
+`CommonML.jsPlaceBuildArtifactsIn` field will determine where the js build
+artifacts will be placed. It is considered relative to the package root of
+the package that you're running the build command for.  If not specified,
+it will just be placed in that package root directly.
 
-    When running locally, source maps naturally work correctly because they
-    specify absolute file paths to original source files. But when serving that
-    web server root from a web server, the same origin policy restricts you
-    from seeing the source maps. So (unfortunately) `CommonML` has to pollute
-    that destination `jsPlaceBuildArtifactsIn` with a faked directory path that
-    resembles the absolute path to where your original source files were
-    located so that source maps will work even when running on a web server.
-    You will see a generated path that symlinks to your original build
-    directory, such as:
+Wherever those js build artifacts are placed is considered your "web server
+root".
 
-
-        YourProject/myJsPlaceBuildArtifactsIn/Users/yourName/path/to/YourProject/_build_ocamlc_debug ->  YourProject/_build_ocamlc_debug/
+When running locally, source maps naturally work correctly because they
+specify absolute file paths to original source files. But when serving that
+web server root from a web server, the same origin policy restricts you
+from seeing the source maps. So (unfortunately) `CommonML` has to pollute
+that destination `jsPlaceBuildArtifactsIn` with a faked directory path that
+resembles the absolute path to where your original source files were
+located so that source maps will work even when running on a web server.
+You will see a generated path that symlinks to your original build
+directory, such as:
 
 
-    This is just so that when you run a web server at
-    `YourProject/myJsPlaceBuildArtifactsIn` (or whatever you configured
-    `jsPlaceBuildArtifactsIn`) source maps will work correctly.
+    YourProject/myJsPlaceBuildArtifactsIn/Users/yourName/path/to/YourProject/_build_ocamlc_debug ->  YourProject/_build_ocamlc_debug/
 
-    TODO: Find a better solution and/or have `js_of_ocaml` just inline the
-    source contents into the sourcemaps so we don't have to deal with file
-    paths at all.
+
+This is just so that when you run a web server at
+`YourProject/myJsPlaceBuildArtifactsIn` (or whatever you configured
+`jsPlaceBuildArtifactsIn`) source maps will work correctly.
+
+TODO: Find a better solution and/or have `js_of_ocaml` just inline the
+source contents into the sourcemaps so we don't have to deal with file
+paths at all.
 
 
 
