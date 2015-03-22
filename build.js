@@ -10,7 +10,6 @@ var whereis = require('whereis');
 var argv = optimist.argv;
 
 var STYLE = path.join(__dirname, 'docGenerator', 'docStyle.css');
-var PAGE_TEMPLATE_DIR = path.join(__dirname, 'jsGenerator');
 
 
 var cliConfig = {
@@ -163,6 +162,22 @@ var merge = function(one, two) {
   }
   return result;
 };
+
+var createSymlinkCommands = function(from, to) {
+  var symlinkIsInDir = path.resolve(from, '..');
+
+  return [
+    // Ensure `from` is sufficiently created.
+    ['mkdir', '-p', symlinkIsInDir].join(' '),
+    // If rebuilding, trying to ln to an already linked file is an error!
+    // Unix commands are the worst. So we must first touch it, then unlink
+    // it before we try to link it.
+    ['touch', from].join(' '),
+    ['unlink', from].join(' '),
+    ['ln', '-s', to, from].join(' ')
+  ];
+};
+
 
 var stockSourceExtensions = {
   '.mli': true,
@@ -648,14 +663,14 @@ var verifyPackageConfig = function(packageConfig) {
     exports: true,
     compileFlags: true,
     linkFlags: true,
-    jsResources: true,
+    jsPlaceBuildArtifactsIn: true,
     docFlags: true,
     extensions: true,
     preprocessor: true,
     findlibPackages: true
   });
 
-  var htmlPage = CommonML.jsResources;
+  var htmlPage = CommonML.jsPlaceBuildArtifactsIn;
   if (htmlPage) {
     invariant(typeof htmlPage === 'string', packageName + ' htmlPage field must be a string');
     invariant(
@@ -664,7 +679,7 @@ var verifyPackageConfig = function(packageConfig) {
     );
     invariant(
       htmlPage.charAt(htmlPage.length - 1) !== '/',
-      packageName + 'has a jsResources that ends with a slash. Remove the slash'
+      packageName + 'has a jsPlaceBuildArtifactsIn that ends with a slash. Remove the slash'
     );
   }
 
@@ -1252,42 +1267,41 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     // Can only build the top level packages into JS - ideally we'd also be
     // able to dynamically link JS bundles..
     var shouldCompileExecutableIntoJS = buildConfig.jsCompile && executableArtifact;
-    var jsResourcesField = packageConfig.packageJSON.CommonML.jsResources;
-    var bundleDirToCopy = jsResourcesField ? path.join(packageConfig.realPath, jsResourcesField) : PAGE_TEMPLATE_DIR;
-    var copyBundleInto = shouldCompileExecutableIntoJS &&
-      entireActualBuildDir(rootPackageConfig, buildConfig) + '_js';
-    var ensureCopyBundleIntoDirCommand = ['mkdir', '-p', copyBundleInto].join(' ');
+    var placeJsBuildDirInField = packageConfig.packageJSON.CommonML.jsPlaceBuildArtifactsIn;
+    var dirToContainJsBuildDirSymlink = placeJsBuildDirInField ? path.join(packageConfig.realPath, placeJsBuildDirInField) : packageConfig.realPath;
+    var jsBuildDir = entireActualBuildDir(rootPackageConfig, buildConfig) + '_js';
+    var byteCodeBuildDir = entireActualBuildDir(rootPackageConfig, buildConfig);
+    var ensureJsBuildDirCommand = ['mkdir', '-p', jsBuildDir].join(' ');
     var jsArtifactRelativeForm = './app.js';
-    var jsArtifact = shouldCompileExecutableIntoJS ?  path.join(copyBundleInto, 'app.js') : null;
+    var jsArtifact = shouldCompileExecutableIntoJS ? path.join(jsBuildDir, 'app.js') : null;
 
-    var symlinkIsInDir = shouldCompileExecutableIntoJS &&
-      path.resolve(path.join(copyBundleInto, entireActualBuildDir(rootPackageConfig, buildConfig), '..'));
-    var symlinkIsCalled = shouldCompileExecutableIntoJS &&
-      path.basename(entireActualBuildDir(rootPackageConfig, buildConfig));
-    var symlinkPath = shouldCompileExecutableIntoJS && path.join(symlinkIsInDir, symlinkIsCalled);
-    var makeFakeSymlinkDirectoryStructureCommand = shouldCompileExecutableIntoJS && [
-      'mkdir',
-      '-p',
-      symlinkIsInDir
-    ].join(' ');
-    // If rebuilding, trying to ln to an already linked file is an error! Unix
-    // commands are the worst. So we must first touch it, then unlink it before
-    // we try to link it.
-    var touchSymlinkCommand = shouldCompileExecutableIntoJS && ['touch', symlinkPath].join(' ');
-    var unlinkCommand = shouldCompileExecutableIntoJS && ['unlink', symlinkPath].join(' ');
-    var symlinkSourceMapsCommand = shouldCompileExecutableIntoJS && [
-      'ln',
-      '-s',
-      entireActualBuildDir(rootPackageConfig, buildConfig),
-      path.join(symlinkIsInDir, symlinkIsCalled)
-    ].join(' ');
+    // We create a fake directory structure at the location the output .js
+    // bundle is generated, such that the directory structure matches the
+    // absolute path to the original source locations. The reason is that
+    // absolute paths in the source maps file will only be supported if loading
+    // the html file locally off disk. If loading the html file off a local web
+    // server, you get hit by the same origin policy. Creating a directory
+    // structure that resembles the absolute paths allows source maps to work
+    // on a local web server but without exposing the root file system. It does
+    // clutter up your `jsPlaceBuildArtifactsIn` directory with one new directory.
+    var sourceRootSymlinkIsInDir = shouldCompileExecutableIntoJS &&
+      path.resolve(path.join(dirToContainJsBuildDirSymlink, byteCodeBuildDir, '..'));
+    var sourceRootSymlinkIsCalled = shouldCompileExecutableIntoJS && path.basename(byteCodeBuildDir);
+    var sourceRootSymlinkPath = shouldCompileExecutableIntoJS && path.join(sourceRootSymlinkIsInDir, sourceRootSymlinkIsCalled);
+
+    var symlinkSourceMapsCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
+      sourceRootSymlinkPath,
+      byteCodeBuildDir
+    );
+    var symlinkBuildDirCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
+      path.join(dirToContainJsBuildDirSymlink, 'jsBuild'),
+      jsBuildDir
+    );
 
     // The cp command is such a broken API - there isn't a way to overwrite
     // an entire directory.
-    var copyBundleDirCommand =
-      shouldCompileExecutableIntoJS && ['cp -r', bundleDirToCopy + '/*', copyBundleInto].join(' ');
     // Change into the root directory so that source maps are w.r.t. correct location.
-    var changeDir = shouldCompileExecutableIntoJS && ['cd', copyBundleInto ].join(' ');
+    var changeDir = shouldCompileExecutableIntoJS && ['cd', jsBuildDir ].join(' ');
     var buildJSArtifactCommand = shouldCompileExecutableIntoJS && [
       'js_of_ocaml',
       '--source-map',
@@ -1308,7 +1322,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       'echo " >"',
       'echo " >"',
       'echo " >         Serving:"',
-      'echo " >         file:\/\/' + copyBundleInto + '/index.html "',
+      'echo " >         file:\/\/' + dirToContainJsBuildDirSymlink + '/index.html "',
       'echo " >"',
       'echo " >         At:"',
       'echo " >         http:\/\/localhost:8000\/index.html "',
@@ -1318,19 +1332,18 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     var buildJSCommands = shouldCompileExecutableIntoJS ? [
       // makeBackupDir,
       // moveOldBundleDirCommand,
-      ensureCopyBundleIntoDirCommand,
-      copyBundleDirCommand,
+      ensureJsBuildDirCommand,
       changeDir,
       buildJSArtifactCommand,
-      echoJSMessage,
-      makeFakeSymlinkDirectoryStructureCommand,
-      touchSymlinkCommand,
-      unlinkCommand,
-      symlinkSourceMapsCommand
-    ].join('\n') : null;
+      echoJSMessage
+    ].concat(
+      symlinkSourceMapsCommands
+    ).concat(
+      symlinkBuildDirCommands
+    ).join('\n') : null;
 
     var startServer = shouldCompileExecutableIntoJS ? [
-      'pushd ' + copyBundleInto + ' && python -m SimpleHTTPServer || popd'
+      'pushd ' + dirToContainJsBuildDirSymlink + ' && python -m SimpleHTTPServer || popd'
     ].join('\n') : null;
 
 
