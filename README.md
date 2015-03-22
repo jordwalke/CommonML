@@ -205,28 +205,27 @@ and intermediate build artifacts for dependencies are placed at
 
 *Build JavaScript With Sourcemaps:(From `YourProject` root)*
 
-> If you have feedback about the actual debugging experience with source maps
-> (breakpoints, stepping through etc), please file issues on the `js_of_ocaml`
-> github page. Include screenshots, screencasts or detailed descriptions of how
-> the debugging experience can be made intuitive and more similar to debugging
-> JS.
->
->     https://github.com/ocsigen/js_of_ocaml/issues
-
-
     # Building JavaScript is a special case of building for debug, and building
     # for bytecode (a final step converts the bytecode to JavaScript).
     # Ensure you have `js_of_ocaml` installed and available on your PATH.
     # Install via `opam install js_of_ocaml`.
     node node_modules/CommonML/build.js --forDebug=true --jsCompile=true
-    # open the test page
+    # open a test html page that includes `./jsBuild/app.js'
 
-    # Then run
-    open ./_build_ocamlc/YourProject/yourProject.html
 
 
 Customizing JavaScript Build Location And Running With Server
 ----------------------------
+> If you have feedback about the actual debugging experience with source maps
+> (breakpoints, stepping through etc), please file issues on the `js_of_ocaml`
+> github page. Include screenshots, screencasts or detailed descriptions of how
+> the debugging experience can be made intuitive and more similar to debugging
+> JS.
+
+
+https://github.com/ocsigen/js_of_ocaml/issues
+
+
 
 
 `--jsCompile` will generate two artifacts: The symlink (`jsBuild`) to the
