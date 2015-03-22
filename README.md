@@ -92,7 +92,9 @@ To make your own package just like the example:
     echo '{
       "dependencies": {"CommonML": "git://github.com/jordwalke/CommonML.git"},
       "CommonML": {
-        "exports": ["MyPublicModule"]
+        "exports": ["MyPublicModule"],
+        "compileFlags": [],
+        "linkFlags": []
       }
     }' >> ./package.json
 
