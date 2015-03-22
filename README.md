@@ -205,13 +205,13 @@ and intermediate build artifacts for dependencies are placed at
 
 *Build JavaScript With Sourcemaps:(From `YourProject` root)*
 
->> If you have feedback about the actual debugging experience with source maps
->> (breakpoints, stepping through etc), please file issues on the `js_of_ocaml`
->> github page. Include screenshots, screencasts or detailed descriptions of
->> how the debugging experience can be made intuitive and more similar to
->> debugging JS.
->>
->>     https://github.com/ocsigen/js_of_ocaml/issues
+> If you have feedback about the actual debugging experience with source maps
+> (breakpoints, stepping through etc), please file issues on the `js_of_ocaml`
+> github page. Include screenshots, screencasts or detailed descriptions of how
+> the debugging experience can be made intuitive and more similar to debugging
+> JS.
+>
+>     https://github.com/ocsigen/js_of_ocaml/issues
 
 
     # Building JavaScript is a special case of building for debug, and building
