@@ -290,11 +290,6 @@ them. See `ExampleProjects/MyProject/`.
 from a web server, or from local disk. It does this by creating the appropriate
 sym links that your browser's source maps will understand.
 
-TODO: `js_of_ocaml` should itself be turned into a `CommonML` dependency to
-remove any need to use the `findlibPackages` field (it's confusing that we even
-have the notion of "findlib packages") and `package.json` is fully sufficient
-to do everything we need. This is only temporary.
-
 Compatibility:
 -------------
 
@@ -496,6 +491,10 @@ TODO:
   - Find a better solution for sourcemaps than creating fake directory
     structures and/or have `js_of_ocaml` just inline the source contents into
     the sourcemaps so we don't have to deal with file paths at all.
+  - `js_of_ocaml` should itself be turned into a `CommonML` dependency to
+    remove any need to use the `findlibPackages` field (it's confusing that we
+    even have the notion of "findlib packages") and `package.json` is fully
+    sufficient to do everything we need. This is only temporary.
 
 
 
