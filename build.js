@@ -1009,7 +1009,15 @@ var getOCamldepFlags = function(packageConfig) {
       return '';
     }
     var kind = maybeSourceKind(sourceFile, packageConfig);
-    return kind === '.ml' ? ' -impl ' + sourceFile : ' -intf ' + sourceFile;
+    // Be careful to not include e.g. .mll .mly files
+    if (kind === '.ml') {
+      return ' -impl ' + sourceFile;
+    } else if (kind === '.mli') {
+      return ' -intf ' + sourceFile;
+    } else {
+      // XXX: Should perhaps have a better handler for this.
+      return '';
+    }
   });
   var ppFlags = packageConfig.packageJSON.CommonML.preprocessor ? [
     '-pp ' + packageConfig.packageJSON.CommonML.preprocessor
