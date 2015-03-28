@@ -1323,23 +1323,27 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     ].join(' ');
 
     var echoJSMessage = [
-      'echo ""',
-      'echo " > JavaScript Package at: ' + jsArtifact + '"',
-      'echo " > Open this page in Chrome, open the dev tools, *then* refresh."',
-      'echo " > You will see source maps and be able to set break points."',
-      'echo " >"',
-      'echo " >"',
-      'echo " >         Serving:"',
-      'echo " >         file:\/\/' + dirToContainJsBuildDirSymlink + '/index.html "',
-      'echo " >"',
-      'echo " >         At:"',
-      'echo " >         http:\/\/localhost:8000\/index.html "',
-      'echo " >"'
+      '#',
+      '# JavaScript Package at: ' + jsArtifact,
+      '#',
+      '# Create an index html page (that includes script ./jsBuild/app.js) at :',
+      '#',
+      '#    file:\/\/' + dirToContainJsBuildDirSymlink + '/index.html ',
+      '#',
+      '# Then you can serve it using python via:',
+      '#',
+      '#    pushd ' + dirToContainJsBuildDirSymlink + ' && python -m SimpleHTTPServer || popd',
+      '#',
+      '# And open it by clicking on:',
+      '#',
+      '#    http:\/\/localhost:8000\/index.html ',
+      '#',
+      '# Open in Chrome, open the dev tools, *then* refresh to see source maps.',
+      '#',
+      '#'
     ].join('\n');
 
-    var buildJSCommands = shouldCompileExecutableIntoJS ? [
-      // makeBackupDir,
-      // moveOldBundleDirCommand,
+    var buildJSCommands = (shouldCompileExecutableIntoJS ? [
       ensureJsBuildDirCommand,
       changeDir,
       buildJSArtifactCommand,
@@ -1348,17 +1352,12 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       symlinkSourceMapsCommands
     ).concat(
       symlinkBuildDirCommands
-    ).join('\n') : null;
-
-    var startServer = shouldCompileExecutableIntoJS ? [
-      'pushd ' + dirToContainJsBuildDirSymlink + ' && python -m SimpleHTTPServer || popd'
-    ].join('\n') : null;
-
+    ) : []).join('\n');
 
     var compileCommands =
       (mightNeedSomething && needsModuleRecompiles ? [compileAliasesCommand].concat([compileModulesCommands]) : [])
       .concat(mightNeedSomething && executableArtifact ? [compileExecutableCommand] : [])
-      .concat(shouldCompileExecutableIntoJS ? [buildJSCommands, startServer] : []);
+      .concat(shouldCompileExecutableIntoJS ? [buildJSCommands] : []);
 
     var compileModulesMsg =
       sourceFilesToRecompile.length === 0 ?
