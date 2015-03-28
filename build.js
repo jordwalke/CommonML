@@ -302,7 +302,7 @@ var isExported = function(packageConfig, filePath) {
  */
 var getPublicSourceModules = function(unsanitizedPaths, packageConfig) {
   return unsanitizedPaths.filter(function(unsanitizedPath) {
-    if (maybeSourceKind(unsanitizedPath) !== '.ml' || !unsanitizedPath) {
+    if (maybeSourceKind(unsanitizedPath, packageConfig) !== '.ml' || !unsanitizedPath) {
       return false;
     }
     return isExported(packageConfig, unsanitizedPath);
@@ -323,7 +323,7 @@ var namespaceUppercase = function(packageConfig, name) {
 var getSanitizedPublicOutputs = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   return getPublicSourceModules(unsanitizedPaths, packageConfig).map(
     function(unsanitizedPath) {
-      var unsanitizedArtifact = buildArtifact(unsanitizedPath, packageConfig);
+      var unsanitizedArtifact = buildArtifact(unsanitizedPath, buildConfig, packageConfig);
       return sanitizedArtifact(unsanitizedArtifact, packageConfig, rootPackageConfig, buildConfig);
     }
   );
