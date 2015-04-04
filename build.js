@@ -1664,8 +1664,7 @@ var _walkSubprojects = function(resultsSoFar, roots, onEach, onDone) {
     onDone(resultsSoFar);
   } else {
     _walkProjectTree(resultsSoFar, roots[0], onEach, function(doneRootProject, recurseResults) {
-      var nextResultsSoFar = resultsSoFar.concat(recurseResults);
-      _walkSubprojects(nextResultsSoFar, roots.slice(1), onEach, onDone);
+      _walkSubprojects(recurseResults, roots.slice(1), onEach, onDone);
     });
   }
 };
