@@ -347,19 +347,6 @@ var getPublicBuildDirs = function(unsanitizedPaths, packageConfig, rootPackageCo
   });
 };
 
-var getFileCopyCommands = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
-  return unsanitizedPaths.map(function(unsanitizedPath) {
-    if (!isSourceFile(unsanitizedPath, packageConfig)) {
-      throw new Error('Do not know what to do with :' + unsanitizedPath);
-    }
-    return [
-      'cp',
-      unsanitizedPath,
-      sanitizedArtifact(unsanitizedPath, packageConfig, rootPackageConfig, buildConfig),
-    ].join(' ');
-  });
-};
-
 var getFileCopyCommandsForDoc = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   return unsanitizedPaths.map(function(unsanitizedPath) {
     if (!isSourceFile(unsanitizedPath, packageConfig)) {
@@ -491,7 +478,7 @@ var getNamespacedFileOutputCommands = function(compileCommand, unsanitizedPaths,
       '-o',
       sanitizedNamespacedModule,
     ].concat(extensionFlags)
-    .concat([sanitizedPath]).join(' ');
+    .concat([unsanitizedPath]).join(' ');
   }).join(' ');
 
 };
@@ -1099,18 +1086,6 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
 
     var needsModuleRecompiles = sourceFilesToRecompile.length > 0;
 
-
-    /**
-     * Compiling individual modules
-     * TODO: Can we avoid copying entirely? I believe so.
-     */
-    var fileCopyCommands = getFileCopyCommands(
-      sourceFilesToRecompile,
-      packageConfig,
-      rootPackageConfig,
-      buildConfig
-    );
-
     var fileOutputDirs = getSanitizedOutputDirs(
       ocamldepOrderedSourceFiles,
       packageConfig,
@@ -1425,7 +1400,6 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     // a full recompilation of the project to prevent "inconsistent interfaces"
     // errors).
     needsRegenerateCompileAliases && buildScriptForThisPackage.push(autoGenAliases.generateCommands);
-    buildScriptForThisPackage.push.apply(buildScriptForThisPackage, fileCopyCommands);
     buildScriptForThisPackage.push(compileCmdMsg);
     buildScriptForThisPackage.push(merlinCommand);
     // The compileCommands should be last just in case we're running the JS
