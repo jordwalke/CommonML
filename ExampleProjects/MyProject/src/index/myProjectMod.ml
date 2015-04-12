@@ -12,6 +12,10 @@ let reexportedYourValue:opaquifiedYourProjectType =
   CommonMLExampleDependency.ExampleMod.yourProjectValue
 
 
+(* Uncomment this to verify that private non-exported modules of dependencies
+   may not be relied upon. *)
+(* let _ = CommonMLExampleDependency.PrivateModule.privateVal *)
+
 let _ = CommonMLExampleDependency.Util.yourUtilVal
 let _ = print_string myProjectValue
 
