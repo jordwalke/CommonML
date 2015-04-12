@@ -1118,7 +1118,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       [compileCommand]
       .concat(singleFileCompileFlags)
       .concat(searchPaths)
-      .concat(['-bin-annot -open', autoGenAliases.internalModuleName]).join(' ') + ' ';
+      .concat(['-open', autoGenAliases.internalModuleName]).join(' ') + ' ';
 
     // The performance of this will be horrible if using ocamlfind with custom
     // packages - it takes a long time to look those up, and we do it for every
@@ -1134,13 +1134,13 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     // Always repack regardless of what changed it's pretty cheap.
     var compileAliasesCommand =
       [compileCommand]
+      .concat(singleFileCompileFlags)
       // -bin-annot generates .cmt files for the pack which merlin needs to
       // work correctly.
       // Need to add -49 so that it doesn't complain because we haven't
       // actually compiled the namespaced modules yet. They are like forward
       // declarations in that sense.
-      .concat(['-bin-annot -no-alias-deps -w -49'])
-      .concat(['-c'])
+      .concat(['-no-alias-deps -w -49'])
       .concat(searchPaths)
       .concat([
         autoGenAliases.genSourceFiles.internalInterface,
