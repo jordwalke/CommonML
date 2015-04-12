@@ -219,8 +219,8 @@ function removeBreaks(str) {
 }
 
 
-var aliasPackModuleName = function(packageConfig, internal) {
-  return internal ? ('M_Internal_' + packageConfig.packageName) : packageConfig.packageName;
+var aliasPackModuleName = function(packageConfig) {
+  return packageConfig.packageName;
 };
 
 /**
@@ -230,7 +230,7 @@ var aliasPackModuleName = function(packageConfig, internal) {
 var aliasMapperFile = function(internal, packageConfig, rootPackageConfig, buildConfig, extension) {
   var unsanitizedAliasModule = path.join(
     packageConfig.realPath,
-    lowerBase(aliasPackModuleName(packageConfig, internal)) + extension
+    lowerBase(aliasPackModuleName(packageConfig)) + extension
   );
   var sanitizedPackPath = sanitizedArtifact(
     unsanitizedAliasModule,
@@ -320,31 +320,10 @@ var namespaceUppercase = function(packageConfig, name) {
   return 'M_' + packageConfig.packageName + '__' + base;
 };
 
-var getSanitizedPublicOutputs = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
-  return getPublicSourceModules(unsanitizedPaths, packageConfig).map(
-    function(unsanitizedPath) {
-      var unsanitizedArtifact = buildArtifact(unsanitizedPath, buildConfig, packageConfig);
-      return sanitizedArtifact(unsanitizedArtifact, packageConfig, rootPackageConfig, buildConfig);
-    }
-  );
-};
-
 var getPublicSourceDirs = function(unsanitizedPaths, packageConfig) {
   var publicModulePaths =
     getPublicSourceModules(unsanitizedPaths, packageConfig);
   return publicModulePaths.map(path.dirname.bind(path));
-};
-
-var getPublicBuildDirs = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
-  var sanitizedPublicOutputs = getSanitizedPublicOutputs(
-    unsanitizedPaths,
-    packageConfig,
-    rootPackageConfig,
-    buildConfig
-  );
-  return sanitizedPublicOutputs.map(function(sanitizedOutput) {
-    return path.dirname(sanitizedOutput);
-  });
 };
 
 var getFileCopyCommandsForDoc = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
@@ -377,41 +356,24 @@ var createAliases = function(unsanitizedPaths, packageConfig) {
 };
 var autogenAliasesCommand = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   var internalModuleName = aliasPackModuleName(packageConfig, true);
-  var externalModuleName = aliasPackModuleName(packageConfig, false);
   var internalAliases =
     "(* Automatically generated module aliases file [" + internalModuleName + "].\n * " +
       "All internal modules are compiled with [-open " + internalModuleName + "] \n * " +
       "so that every internal module has immediate access to every other internal module." +
-      "\n * A separate module [" +
-       externalModuleName +
-       "] is automatically generated for modules that depend on \n * " +
-       packageConfig.packageName +
-       " which only exposes the 'exported' modules in the [package.json]." +
-       "\n * This one, however includes all inner modules so that the project itself " +
-       "\n * can see even the modules that are not exported.\n *)" +
+       "*)" +
     createAliases(unsanitizedPaths, packageConfig);
-  var externalAliases =
-    createAliases(unsanitizedPaths.filter(isExported.bind(null, packageConfig)), packageConfig);
   var internalDotMl = aliasMapperFile(true, packageConfig, rootPackageConfig, buildConfig, '.ml');
   var internalDotMli = aliasMapperFile(true, packageConfig, rootPackageConfig, buildConfig, '.mli');
-  var externalDotMl = aliasMapperFile(false, packageConfig, rootPackageConfig, buildConfig, '.ml');
-  var externalDotMli = aliasMapperFile(false, packageConfig, rootPackageConfig, buildConfig, '.mli');
   return {
     generateCommands: [
       'echo "' + internalAliases + '" > ' + internalDotMl,
       'echo "' + internalAliases + '" > ' + internalDotMli,
-      'echo "' + externalAliases + '" > ' + externalDotMl,
-      'echo "' + externalAliases + '" > ' + externalDotMli
     ].join('\n'),
     internalModuleName: internalModuleName,
-    externalModuleName: externalModuleName,
     genSourceFiles: {
       internalInterface: internalDotMli,
       internalImplementation: internalDotMl,
-      externalInterface: externalDotMli,
-      externalImplementation: externalDotMl
-    },
-    directory: path.resolve(internalDotMl, '..'),
+    }
   };
 };
 
@@ -508,29 +470,29 @@ var getModuleArtifacts = function(unsanitizedPaths, packageConfig, rootPackageCo
       throw new Error('Do not know what to do with :' + unsanitizedPath);
     }
     var basename = path.basename(unsanitizedPath, path.extname(unsanitizedPath));
-    return maybeSourceKind(unsanitizedPath, packageConfig) === '.ml' ? sanitizedArtifact(
-      path.resolve(unsanitizedPath, '..', namespaceLowercase(packageConfig, basename) + objectExtension(buildConfig)),
-      packageConfig,
-      rootPackageConfig,
-      buildConfig
+    return maybeSourceKind(unsanitizedPath, packageConfig) === '.ml' ?  path.resolve (
+      sanitizedArtifact(unsanitizedPath, packageConfig, rootPackageConfig, buildConfig),
+      '..', namespaceLowercase(packageConfig, basename) + objectExtension(buildConfig)
     ) : '';
   });
 };
 
 
-var getSanitizedOutputDirs = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
-  var seen = {};
-  return unsanitizedPaths.map(function(unsanitizedPath) {
-    var sanitized =
-      sanitizedArtifact(buildArtifact(unsanitizedPath, buildConfig, rootPackageConfig), packageConfig, rootPackageConfig, buildConfig);
-    var dirName = path.dirname(sanitized);
-    if (seen[dirName]) {
-      return null;
-    }
-    seen[dirName] = true;
-    return dirName;
-  }).filter(function(o) {return o !== null;});
+var getSanitizedBuildDirs = function(packageConfig, rootPackageConfig, buildConfig) {
+  return [
+    publicArtifactDir(packageConfig, rootPackageConfig, buildConfig),
+    privateArtifactDir(packageConfig, rootPackageConfig, buildConfig),
+    aliasAndExecutableArtifactDir(packageConfig, rootPackageConfig, buildConfig)
+  ];
 };
+
+var getPublicSanitizedBuildDirs = function(packageConfig, rootPackageConfig, buildConfig) {
+  return [
+    publicArtifactDir(packageConfig, rootPackageConfig, buildConfig),
+    aliasAndExecutableArtifactDir(packageConfig, rootPackageConfig, buildConfig)
+  ];
+};
+
 
 var getSanitizedOutputDirsForDoc = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   var seen = {};
@@ -577,10 +539,59 @@ var sanitizedDependencyBuildDirectoryForDoc = function(packageConfig, rootPackag
 
 var sanitizedArtifact = function(absPath, packageConfig, rootPackageConfig, buildConfig) {
   var originalRelativeToItsPackage = path.relative(packageConfig.realPath, absPath);
-  return path.resolve(
+  var upper = upperBasenameBase(absPath);
+  var isExportedInnerModule = isExported(packageConfig, absPath);
+  var isExecutableOrAliases = upper === packageConfig.packageName;
+
+  // As if the original file were moved to the top of dependency build
+  // directory, or public/private.
+  return isExecutableOrAliases ? path.join(
+      sanitizedDependencyBuildDirectory(packageConfig, rootPackageConfig, buildConfig),
+      path.basename(absPath)
+    ) :
+    isExportedInnerModule ? path.resolve(
+        publicArtifactDir(packageConfig, rootPackageConfig, buildConfig),
+        path.basename(absPath)
+      ) :
+    path.resolve(
+      privateArtifactDir(packageConfig, rootPackageConfig, buildConfig),
+      path.basename(absPath)
+    );
+};
+
+
+/**
+ * We will compile one module alias mapped interface such as [MyPackage] so
+ * that type signatures are always the same, and we don't need to make ugly
+ * namespaces nicer in IDEs. (The individual module names will still be ugly
+ * because they must be flattened).
+ *
+ * Then each dependency will have two directories:
+ * - publicInnerModules/
+ * - privateInnerModules/
+ *
+ * When compiling the project itself, both directories are added to the search
+ * paths.
+ * When compiling something that depends on it, only the public path is added.
+ * When linking a final executable, search paths aren't needed, we just need
+ * the topological ordering of compiled implementations.
+ */
+var publicArtifactDir = function(packageConfig, rootPackageConfig, buildConfig) {
+  return path.join(
     sanitizedDependencyBuildDirectory(packageConfig, rootPackageConfig, buildConfig),
-    originalRelativeToItsPackage
+    'publicInnerModules'
   );
+};
+
+var privateArtifactDir = function(packageConfig, rootPackageConfig, buildConfig) {
+  return path.join(
+    sanitizedDependencyBuildDirectory(packageConfig, rootPackageConfig, buildConfig),
+    'privateInnerModules'
+  );
+};
+
+var aliasAndExecutableArtifactDir = function(packageConfig, rootPackageConfig, buildConfig) {
+  return sanitizedDependencyBuildDirectory(packageConfig, rootPackageConfig, buildConfig);
 };
 
 var sanitizedArtifactForDoc = function(absPath, packageConfig, rootPackageConfig, buildConfig) {
@@ -737,47 +748,24 @@ var generateDotMerlinForPackage = function(autoGenAliases, moduleArtifacts, root
   });
   var flgs = ['FLG ' + filteredCompilerFlags.join(' ') + ' -open ' + autoGenAliases.internalModuleName];
 
-  var depInternalModuleLocations = [];
-  var depPublicBuildLocations = [];
+  var depSourceDirs = [];
   for (var subpackageName in packageConfig.subpackages) {
     var subpackage = packageConfig.subpackages[subpackageName];
     // This messes merlin up because two different projects can have the same
     // module name (when packed). Once that is resolved this should work.
     // https://github.com/the-lambda-church/merlin/issues/284
     // Otherwise this will work
-    var depPublicSourceDirs = getPublicSourceDirs(
-      subpackage.packageResources.sourceFiles,
-      subpackage
-    );
-    depInternalModuleLocations.push.apply(
-      depInternalModuleLocations,
-      depPublicSourceDirs
-    );
-    var depPublicBuild = getPublicBuildDirs(
-      subpackage.packageResources.sourceFiles,
-      subpackage,
-      rootPackageConfig,
-      buildConfig
-    );
-    depPublicBuildLocations.push.apply(
-      depPublicBuildLocations,
-      depPublicBuild
-    );
+    var depPublicSourceDirs = getPublicSourceDirs(subpackage.packageResources.sourceFiles, subpackage);
+    depSourceDirs.push.apply(depSourceDirs, depPublicSourceDirs);
   }
-  var sanitizedDepPacks = sanitizedDependencyPackDirectories(packageConfig, rootPackageConfig, buildConfig);
-  var aliasPack = aliasMapperFile(true, packageConfig, rootPackageConfig, buildConfig);
-  var sanitizedPackagePackDir = path.dirname(aliasPack);
-  var moduleArtifactsDirs = moduleArtifacts.map(path.dirname.bind(path));
   var merlinBuildDirs =
-    moduleArtifactsDirs
-    .concat([sanitizedPackagePackDir])
-    .concat(sanitizedDepPacks)
-    .concat(depPublicBuildLocations);
+    getSanitizedBuildDirs(packageConfig, rootPackageConfig, buildConfig)
+    .concat(sanitizedImmediateDependenciesPublicPaths(packageConfig, rootPackageConfig, buildConfig));
   // For now, we build right where we have source files
   var buildLines = merlinBuildDirs.map(function(src) {return 'B ' + src;});
   var merlinSourceDirs =
     packageConfig.packageResources.directories
-    .concat(depInternalModuleLocations);
+    .concat(depSourceDirs);
   var sourceLines = merlinSourceDirs.map(function(src) {return 'S ' + src;});
   var dotMerlinSource = sourceLines.concat(buildLines)
   .concat(buildTags)
@@ -964,7 +952,7 @@ var sanitizedImmediateDependenciesPublicPaths = function(packageConfig, rootPack
     var subpackage = subpackages[subpackageName];
     immediateDependenciesPublicDirs.push.apply(
       immediateDependenciesPublicDirs,
-      getPublicBuildDirs(subpackage.packageResources.sourceFiles, subpackage, rootPackageConfig, buildConfig)
+      getPublicSanitizedBuildDirs(subpackage, rootPackageConfig, buildConfig)
     );
   }
   return immediateDependenciesPublicDirs;
@@ -1086,8 +1074,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
 
     var needsModuleRecompiles = sourceFilesToRecompile.length > 0;
 
-    var fileOutputDirs = getSanitizedOutputDirs(
-      ocamldepOrderedSourceFiles,
+    var fileOutputDirs = getSanitizedBuildDirs(
       packageConfig,
       rootPackageConfig,
       buildConfig
@@ -1105,9 +1092,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     var singleFileCompileFlags = getSingleFileCompileFlags(packageConfig, buildConfig, true);
 
     var searchPaths = makeSearchPathStrings(
-      prevTransitiveArtifacts.map(path.dirname.bind(path))
-      .concat(fileOutputDirs)
-      .concat([autoGenAliases.directory])
+      fileOutputDirs
       .concat(sanitizedImmediateDependenciesPublicPaths(packageConfig, rootPackageConfig, buildConfig))
     );
 
@@ -1145,8 +1130,6 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       .concat([
         autoGenAliases.genSourceFiles.internalInterface,
         autoGenAliases.genSourceFiles.internalImplementation,
-        autoGenAliases.genSourceFiles.externalInterface,
-        autoGenAliases.genSourceFiles.externalImplementation
       ])
       .join(' ');
 
@@ -1250,7 +1233,6 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     // get the .cmos.
     var justTheModuleArtifacts =
       getModuleArtifacts(ocamldepOrderedSourceFiles, packageConfig, rootPackageConfig, buildConfig);
-    prevTransitiveArtifacts.push(buildArtifact(autoGenAliases.genSourceFiles.externalImplementation, buildConfig, packageConfig));
     prevTransitiveArtifacts.push(buildArtifact(autoGenAliases.genSourceFiles.internalImplementation, buildConfig, packageConfig));
     prevTransitiveArtifacts.push.apply(prevTransitiveArtifacts, justTheModuleArtifacts);
     // The root package should be runable
@@ -1284,15 +1266,15 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     // structure that resembles the absolute paths allows source maps to work
     // on a local web server but without exposing the root file system. It does
     // clutter up your `jsPlaceBuildArtifactsIn` directory with one new directory.
-    var sourceRootSymlinkIsInDir = shouldCompileExecutableIntoJS &&
-      path.resolve(path.join(dirToContainJsBuildDirSymlink, byteCodeBuildDir, '..'));
-    var sourceRootSymlinkIsCalled = shouldCompileExecutableIntoJS && path.basename(byteCodeBuildDir);
-    var sourceRootSymlinkPath = shouldCompileExecutableIntoJS && path.join(sourceRootSymlinkIsInDir, sourceRootSymlinkIsCalled);
-
-    var symlinkSourceMapsCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
-      sourceRootSymlinkPath,
-      byteCodeBuildDir
-    );
+    // var sourceRootSymlinkIsInDir = shouldCompileExecutableIntoJS &&
+    //   path.join(dirToContainJsBuildDirSymlink, byteCodeBuildDir, '..');
+    // var sourceRootSymlinkIsCalled = shouldCompileExecutableIntoJS && path.basename(packageConfig.realPath);
+    // var sourceRootSymlinkPath = shouldCompileExecutableIntoJS && path.join(sourceRootSymlinkIsInDir, sourceRootSymlinkIsCalled);
+    //
+    // var symlinkSourceMapsCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
+    //   sourceRootSymlinkPath,
+    //   packageConfig.realPath
+    // );
     var symlinkBuildDirCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
       path.join(dirToContainJsBuildDirSymlink, 'jsBuild'),
       jsBuildDir
@@ -1347,8 +1329,8 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       buildJSArtifactCommand,
       echoJSMessage
     ].concat(
-      symlinkSourceMapsCommands
-    ).concat(
+    //   symlinkSourceMapsCommands
+    // ).concat(
       symlinkBuildDirCommands
     ) : []).join('\n');
 
@@ -1487,17 +1469,6 @@ function getPackageResourcesForRoot(absDir) {
     };
   }
   return getPackageResources(sourceDir);
-}
-
-function sanitizedDependencyPackDirectories(packageConfig, rootPackageConfig, buildConfig) {
-  var dependencyPackDirectories = [];
-  var subpackages = packageConfig.subpackages;
-  for (var subpackageName in subpackages) {
-    var subpackage = subpackages[subpackageName];
-    var sanitizedPackOutput = aliasMapperFile(false, subpackage, rootPackageConfig, buildConfig);
-    dependencyPackDirectories.push(path.dirname(sanitizedPackOutput));
-  }
-  return dependencyPackDirectories;
 }
 
 function getPackageJSONForPackage(absDir) {
