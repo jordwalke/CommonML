@@ -392,6 +392,7 @@ var autogenAliasesCommand = function(unsanitizedPaths, packageConfig, rootPackag
       "so that every internal module has immediate access to every other internal module." +
        "*)" +
     createAliases(unsanitizedPaths, packageConfig);
+
   var internalDotMl = aliasMapperFile(true, packageConfig, rootPackageConfig, buildConfig, '.ml');
   var internalDotMli = aliasMapperFile(true, packageConfig, rootPackageConfig, buildConfig, '.mli');
   return {
@@ -1546,13 +1547,9 @@ function lowerBase(fileName) {
   return fileName[0].toLowerCase() + fileName.substr(1);
 }
 
-function getPackageResources(absRootDir) {
-  var start = (new Date()).getTime();
+// Uses mutation.
+function getPackageResources(absRootDir, directories, sourceFiles, sourceFileMTimes) {
   var dirList = fs.readdirSync(absRootDir);
-  var end = (new Date()).getTime();
-  var directories = [];
-  var sourceFiles = [];
-  var sourceFileMTimes = [];
   dirList.forEach(function(fileName) {
     var absPath = path.join(absRootDir, fileName);
     var stats = fs.statSync(absPath);
@@ -1564,37 +1561,32 @@ function getPackageResources(absRootDir) {
         dirRealPath
       ].join(' '));
       directories.push(absPath);
+      getPackageResources(absPath, directories, sourceFiles, sourceFileMTimes);
     } else if (true /*isSourceFile(absPath, packageConfig */) {
+      // No way to check source file until package config loaded and extensions
+      // are analyzed.
       sourceFiles.push(absPath);
       sourceFileMTimes.push(stats.mtime.getTime());
     }
   });
+}
 
-  for (var i = 0; i < directories.length; i++) {
-    var subdir = directories[i];
-    var subresults = getPackageResources(subdir);
-    directories.push.apply(directories, subresults.directories);
-    sourceFiles.push.apply(sourceFiles, subresults.sourceFiles);
-    sourceFileMTimes.push.apply(sourceFileMTimes, subresults.sourceFileMTimes);
+function getPackageResourcesForRoot(absDir) {
+  var sourceDir = path.join(absDir, 'src');
+  var directories = [];
+  var sourceFiles = [];
+  var sourceFileMTimes = [];
+
+  if (!directoryExistsSync(sourceDir)) {
+    logError('Does not appear to be a CommonML package with `src` directory:' + absDir);
+  } else {
+    getPackageResources(sourceDir, directories, sourceFiles, sourceFileMTimes);
   }
   return {
     directories: directories,
     sourceFiles: sourceFiles,
     sourceFileMTimes: sourceFileMTimes,
   };
-}
-
-function getPackageResourcesForRoot(absDir) {
-  var sourceDir = path.join(absDir, 'src');
-  if (!directoryExistsSync(sourceDir)) {
-    logError('Does not appear to be a CommonML package with `src` directory:' + absDir);
-    return {
-      directories: [],
-      sourceFiles: [],
-      sourceFileMTimes: [],
-    };
-  }
-  return getPackageResources(sourceDir);
 }
 
 function getPackageJSONForPackage(absDir) {
