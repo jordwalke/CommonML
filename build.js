@@ -35,6 +35,8 @@ var buildConfig = {
   doc: argv.doc || false,
   forDebug: argv.forDebug === 'true',
   jsCompile: argv.jsCompile === 'true',
+  // The path to graphical debugger (coming soon).
+  rebuggerPath: argv.rebuggerPath || null
 };
 
 function invariant(bool, msg) {
@@ -293,6 +295,34 @@ var buildForExecutable = function(packageConfig, rootPackageConfig, buildConfig)
   return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
 };
 
+// A module map, which instructs editors how to build individual files, and a
+// topological ordering of project files so it can know which files should be
+// recompiled when files change.
+var buildForModuleMap = function(packageConfig, rootPackageConfig, buildConfig) {
+  var unsanitizedExecPath =
+    path.join(packageConfig.realPath, lowerBase(packageConfig.packageName) + '.moduleMap');
+  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
+};
+
+// Output for script that boots up a graphics debugger. It needs to know which
+// globally namespaced module names (that the debugger speaks in terms of) map
+// to which original files on disk.
+var buildForRebuggerScript = function(packageConfig, rootPackageConfig, buildConfig) {
+  var unsanitizedExecPath =
+    path.join(packageConfig.realPath, lowerBase(packageConfig.packageName) + '.rebugger');
+  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
+};
+
+// The debugger will need to load up the same mapping inside of Vim to control
+// the graphical debugger from within Vim. This generates a vim script that
+// makes that happen (in theory).
+// Note: The graphical debugger does not yet work - this is all just setup.
+var buildForRebuggerVimScript = function(packageConfig, rootPackageConfig, buildConfig) {
+  var unsanitizedExecPath =
+    path.join(packageConfig.realPath, lowerBase(packageConfig.packageName) + '.vim');
+  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
+};
+
 var isExported = function(packageConfig, filePath) {
   return packageConfig.packageJSON.CommonML.exports.indexOf(upperBasenameBase(filePath)) !== -1;
 };
@@ -426,8 +456,8 @@ var getSingleFileCompileExtensionFlags = function(filePath, packageConfig) {
  * spot when one compilation is failing, or to perform a faster incremental
  * compile while in the editor.
  */
-var getNamespacedFileOutputCommands = function(compileCommand, unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
-  return compileCommand + unsanitizedPaths.map(function(unsanitizedPath) {
+var getNamespacedFileOutputCommands = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
+  return unsanitizedPaths.map(function(unsanitizedPath) {
     invariant(
       isSourceFile(unsanitizedPath, packageConfig),
       'Do not know what to do with :' + unsanitizedPath
@@ -436,13 +466,16 @@ var getNamespacedFileOutputCommands = function(compileCommand, unsanitizedPaths,
     var sanitizedPath =
       sanitizedArtifact(unsanitizedPath, packageConfig, rootPackageConfig, buildConfig);
     var sanitizedNamespacedModule = namespaceFilePath(packageConfig, sanitizedPath);
-    return [
-      '-o',
-      sanitizedNamespacedModule,
-    ].concat(extensionFlags)
-    .concat([unsanitizedPath]).join(' ');
-  }).join(' ');
-
+    return {
+      globalModuleName: upperBasenameBase(sanitizedNamespacedModule),
+      sourcePath: unsanitizedPath,
+      compileOutputString: [
+          '-o',
+          sanitizedNamespacedModule,
+        ].concat(extensionFlags)
+        .concat([unsanitizedPath]).join(' ')
+    };
+  });
 };
 
 var getCompileForDocsPreprocessedFileList = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
@@ -1004,15 +1037,62 @@ var getOCamldepFlags = function(packageConfig) {
     .concat(sourceFileArgs);
 };
 
+
+var getModuleMapCommand = function(filePathByModuleNameByPackageName, moduleMapArtifact) {
+  var lines = [];
+  for (var packageName in filePathByModuleNameByPackageName) {
+    var globalModuleNameAndBuildCommandByFilePath = filePathByModuleNameByPackageName[packageName].globalModuleNameAndBuildCommandByFilePath;
+    for (var filePath in globalModuleNameAndBuildCommandByFilePath) {
+      var globalModuleName = globalModuleNameAndBuildCommandByFilePath[filePath].globalModuleName;
+      var buildCommand = globalModuleNameAndBuildCommandByFilePath[filePath].buildCommand;
+      lines.push(filePath + ':' + buildCommand);
+    }
+  }
+  return 'echo "' + lines.join('\n') + '" > ' + moduleMapArtifact;
+};
+
+var getRebuggerCommand = function(buildConfig, filePathByModuleNameByPackageName, rebuggerArtifact, rebuggerVimArtifact, executableArtifact) {
+  var tokens = [buildConfig.rebuggerPath, executableArtifact];
+  for (var packageName in filePathByModuleNameByPackageName) {
+    var globalModuleNameAndBuildCommandByFilePath = filePathByModuleNameByPackageName[packageName].globalModuleNameAndBuildCommandByFilePath;
+    for (var filePath in globalModuleNameAndBuildCommandByFilePath) {
+      var globalModuleName = globalModuleNameAndBuildCommandByFilePath[filePath].globalModuleName;
+      tokens.push('-M');
+      tokens.push(globalModuleName);
+      tokens.push(filePath);
+    }
+  }
+  tokens.push('-vim');
+  tokens.push(rebuggerVimArtifact);
+  return [
+    'echo "' + tokens.join(' ') + '" > ' + rebuggerArtifact,
+    'chmod 777 '+ rebuggerArtifact
+  ].join('\n');
+};
+
+var getRebuggerVimCommand = function(filePathByModuleNameByPackageName, rebuggerArtifact, executableArtifact) {
+  var lines = [":let g:rebuggerModulesByPath = {}"];
+  for (var packageName in filePathByModuleNameByPackageName) {
+    var globalModuleNameAndBuildCommandByFilePath = filePathByModuleNameByPackageName[packageName].globalModuleNameAndBuildCommandByFilePath;
+    for (var filePath in globalModuleNameAndBuildCommandByFilePath) {
+      var globalModuleName = globalModuleNameAndBuildCommandByFilePath[filePath].globalModuleName;
+      lines.push([":let g:rebuggerModulesByPath['", filePath, "'] = '", globalModuleName, "'"].join(''))
+    }
+  }
+  return 'echo "' + lines.join('\n') + '" > ' + rebuggerArtifact;
+};
+
 var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildConfig, walkResults) {
   var ret = [];
   var prevTransitiveArtifacts = [];
+  var filePathByModuleNameByPackageName = {};
   // TODO: someDependentProjectNeededRecompilationInAWayThatChangedPublicInterface
   var someDependentProjectNeededRecompilation = false;
   var compileCommands = walkResults.map(function(result) {
     var packageConfig = result.packageConfig;
     var packageName = packageConfig.packageName;
     var buildingLibraryMsg = 'Building library ' + packageConfig.packageName;
+    var buildingDebuggingMsg = 'Building debugging support for ' + packageConfig.packageName;
     var cachedResource = resourceCache.byPath[packageConfig.realPath];
     var packageResources = packageConfig.packageResources;
     var commonML = packageConfig.packageJSON.CommonML;
@@ -1108,13 +1188,25 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     // The performance of this will be horrible if using ocamlfind with custom
     // packages - it takes a long time to look those up, and we do it for every
     // file! In the future, cache the result of the findlib command.
-    var compileModulesCommands = getNamespacedFileOutputCommands(
-      singleFileCompile,
+    var compileModuleOutputs = getNamespacedFileOutputCommands(
       sourceFilesToRecompile,
       packageConfig,
       rootPackageConfig,
       buildConfig
     );
+    var compileModulesCommands =
+      singleFileCompile + compileModuleOutputs.map(
+        function(c){return c.compileOutputString;}
+      ).join(' ');
+    filePathByModuleNameByPackageName[packageConfig.packageName] = {
+      globalModuleNameAndBuildCommandByFilePath: {}
+    };
+    compileModuleOutputs.forEach(function(c) {
+      filePathByModuleNameByPackageName[packageConfig.packageName].globalModuleNameAndBuildCommandByFilePath[c.sourcePath] = {
+        globalModuleName: c.globalModuleName,
+        buildCommand: singleFileCompile + c.compileOutputString
+      };
+    });
 
     // Always repack regardless of what changed it's pretty cheap.
     var compileAliasesCommand =
@@ -1142,6 +1234,23 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
 
     var executableArtifact = packageConfig === rootPackageConfig ?
       buildForExecutable(packageConfig, rootPackageConfig, buildConfig) :
+      null;
+
+    var moduleMapArtifact = packageConfig === rootPackageConfig ?
+      buildForModuleMap(packageConfig, rootPackageConfig, buildConfig) :
+      null;
+
+    var rebuggerArtifact = packageConfig === rootPackageConfig &&
+      buildConfig.rebuggerPath !== null &&
+      buildConfig.forDebug &&
+      buildConfig.compiler === 'ocamlc' ?
+      buildForRebuggerScript(packageConfig, rootPackageConfig, buildConfig) :
+      null;
+    var rebuggerVimArtifact = packageConfig === rootPackageConfig &&
+      buildConfig.rebuggerPath !== null &&
+      buildConfig.forDebug &&
+      buildConfig.compiler === 'ocamlc' ?
+      buildForRebuggerVimScript(packageConfig, rootPackageConfig, buildConfig) :
       null;
 
     // TODO: docs compilation
@@ -1246,6 +1355,13 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       .concat(prevTransitiveArtifacts)
       .join(' ');
 
+    var compileModuleMapCommand = !moduleMapArtifact ? '' :
+      getModuleMapCommand(filePathByModuleNameByPackageName, moduleMapArtifact);
+    var compileRebuggerVimScriptCommand = !rebuggerVimArtifact ? '' :
+      getRebuggerVimCommand(filePathByModuleNameByPackageName, rebuggerVimArtifact, executableArtifact);
+    var compileRebuggerScriptCommand = !rebuggerArtifact ? '' :
+      getRebuggerCommand(buildConfig, filePathByModuleNameByPackageName, rebuggerArtifact, rebuggerVimArtifact, executableArtifact);
+
     // Can only build the top level packages into JS - ideally we'd also be
     // able to dynamically link JS bundles..
     var shouldCompileExecutableIntoJS = buildConfig.jsCompile && executableArtifact;
@@ -1340,6 +1456,16 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
       .concat(mightNeedSomething && executableArtifact ? [compileExecutableCommand] : [])
       .concat(shouldCompileExecutableIntoJS ? [buildJSCommands] : []);
 
+    var compileDebuggingSupportCommands =
+      []
+      .concat(mightNeedSomething && executableArtifact ? [compileModuleMapCommand] : [])
+      .concat(mightNeedSomething && executableArtifact ? [compileRebuggerScriptCommand, compileRebuggerVimScriptCommand] : []);
+
+    var compileDebuggingCmdMsg =
+      compileDebuggingSupportCommands.length > 0 ? [boxMsg(buildingDebuggingMsg)].concat(
+        'echo " > Run debugger at: ' + rebuggerArtifact + '"'
+      ).join('\n') : null;
+
     var compileModulesMsg =
       sourceFilesToRecompile.length === 0 ?
         'echo " > No files need recompilation, packing in ' + packageConfig.packageName +
@@ -1351,7 +1477,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     var compileCmdMsg =
       [boxMsg(buildingLibraryMsg), compileModulesMsg]
       .concat(compileCommands.length === 0 ? [] : [
-        'echo " > OCaml Toolchain:"',
+        'echo " > Compiler Toolchain:"',
         // having echo use single quotes doesn't destroy any of the quotes in
         // findlib commands
         "echo ' > " + compileCommands.join("\n> ") + "'"
@@ -1383,10 +1509,10 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     // errors).
     needsRegenerateCompileAliases && buildScriptForThisPackage.push(autoGenAliases.generateCommands);
     buildScriptForThisPackage.push(compileCmdMsg);
-    buildScriptForThisPackage.push(merlinCommand);
-    // The compileCommands should be last just in case we're running the JS
-    // compilation mode which spins up a killable server as the last step.
     buildScriptForThisPackage.push.apply(buildScriptForThisPackage, compileCommands);
+    compileDebuggingCmdMsg !== null && buildScriptForThisPackage.push(compileDebuggingCmdMsg);
+    buildScriptForThisPackage.push.apply(buildScriptForThisPackage, compileDebuggingSupportCommands);
+    buildScriptForThisPackage.push(merlinCommand);
     buildConfig.doc && buildDocScriptForThisPackage.push(docCommandMsg);
     buildConfig.doc && buildDocScriptForThisPackage.push(ensureDirectoryCommandForDoc);
     buildConfig.doc && buildDocScriptForThisPackage.push(ensureDirectoriesCommandForDocIntermediateBuilds);
