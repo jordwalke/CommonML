@@ -1092,6 +1092,10 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
   var compileCommands = walkResults.map(function(result) {
     var packageConfig = result.packageConfig;
     var packageName = packageConfig.packageName;
+    // Already built this dependency
+    if (filePathByModuleNameByPackageName[packageName]) {
+      return [];
+    }
     var buildingLibraryMsg = 'Building library ' + packageConfig.packageName;
     var buildingDebuggingMsg = 'Building debugging support for ' + packageConfig.packageName;
     var cachedResource = resourceCache.byPath[packageConfig.realPath];
@@ -1637,21 +1641,21 @@ function getSubprojectPackageDescriptors(nodeModulesDir) {
   return ret;
 }
 
-function getSubprojectPackageConfigTree(absRootDir, currentlyVisitingByRealPath, packageConfigCacheByRealPath) {
+function getSubprojectPackageConfigTree(absRootDir, currentlyVisitingByRealPath, previouslyTraversedByPackageName) {
   var subprojectDir = path.join(absRootDir, 'node_modules');
   var subdescriptors = getSubprojectPackageDescriptors(subprojectDir);
   var subtree = {};
   for (var subpackageName in subdescriptors) {
     var subdescriptor = subdescriptors[subpackageName];
-    // TODO: packageConfigCacheByRealPath isn't even being used
-    if (!packageConfigCacheByRealPath[subdescriptor.realPath]) {
+    // TODO: previouslyTraversedByPackageName isn't even being used
+    if (!previouslyTraversedByPackageName[subpackageName]) {
       if (currentlyVisitingByRealPath[subdescriptor.realPath]) {
         console.log('Circular dependency on ' + subdescriptor.realPath + ' from ' + absRootDir);
         continue;
       }
       currentlyVisitingByRealPath[subdescriptor.realPath] = true;
-      var subpackages = getSubprojectPackageConfigTree(subdescriptor.realPath, currentlyVisitingByRealPath, packageConfigCacheByRealPath);
-      subtree[subpackageName] = {
+      var subpackages = getSubprojectPackageConfigTree(subdescriptor.realPath, currentlyVisitingByRealPath, previouslyTraversedByPackageName);
+      previouslyTraversedByPackageName[subpackageName] = subtree[subpackageName] = {
         packageName: subpackageName,
         packageResources: getPackageResourcesForRoot(subdescriptor.realPath),
         realPath: subdescriptor.realPath,
@@ -1661,7 +1665,7 @@ function getSubprojectPackageConfigTree(absRootDir, currentlyVisitingByRealPath,
       currentlyVisitingByRealPath[subdescriptor.realPath] = false;
     } else {
       // No need to do it again, this has already been discovered.
-      subtree[subpackageName] = packageConfigCacheByRealPath[subdescriptor.realPath];
+      subtree[subpackageName] = previouslyTraversedByPackageName[subpackageName];
     }
   }
   return subtree;
@@ -1669,9 +1673,9 @@ function getSubprojectPackageConfigTree(absRootDir, currentlyVisitingByRealPath,
 
 function getProjectPackageConfigTree(absRootDir) {
   var currentlyVisitingByRealPath = {};
-  var packageConfigCacheByRealPath = {};
+  var previouslyTraversedByPackageName = {};
   currentlyVisitingByRealPath[absRootDir] = true;
-  var subpackages = getSubprojectPackageConfigTree(absRootDir, currentlyVisitingByRealPath, packageConfigCacheByRealPath);
+  var subpackages = getSubprojectPackageConfigTree(absRootDir, currentlyVisitingByRealPath, previouslyTraversedByPackageName);
   return {
     packageName: path.basename(absRootDir),
     packageResources: getPackageResourcesForRoot(absRootDir),
