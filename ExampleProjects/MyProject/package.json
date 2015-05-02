@@ -11,7 +11,7 @@
     "exports": ["MyProjectMod"],
     "compileFlags": ["-w","-30","-w","-40", "-bin-annot"],
     "linkFlags": [],
-    "jsResources": "jsResources",
+    "jsPlaceBuildArtifactsIn": "webAppRoot",
     "docFlags": [
       "-colorize-code",
       "-css-style",
