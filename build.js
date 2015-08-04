@@ -11,10 +11,24 @@ var argv = optimist.argv;
 
 var STYLE = path.join(__dirname, 'docGenerator', 'docStyle.css');
 
+var CWD = process.cwd();
+var OCAMLC = 'ocamlc';
+var OCAMLOPT = 'ocamlopt';
+var OCAMLDEP = 'ocamldep';
+var OCAMLLEX = 'ocamllex';
+var OCAMLYACC = 'ocamlyacc';
+var OCAMLDOC = 'ocamldoc';
+var OCAMLFIND = 'ocamlfind';
 
 var cliConfig = {
   hidePath: argv.hidePath,
   silent: argv.silent
+};
+
+var programForCompiler = function(comp) {
+  return comp === 'byte' ? OCAMLC :
+         comp === 'native' ? OCAMLOPT :
+         comp;
 };
 
 var buildUniquenessString = function(buildConfig) {
@@ -30,7 +44,7 @@ var actualBuildDirForDocs = function(buildConfig) {
 };
 
 var buildConfig = {
-  compiler: argv.compiler || 'ocamlc',
+  compiler: argv.compiler || 'byte',
   buildDir: argv.buildDir || '_build',
   doc: argv.doc || false,
   forDebug: argv.forDebug === 'true',
@@ -59,13 +73,13 @@ invariant(
 );
 
 invariant(
-  buildConfig.jsCompile ? buildConfig.compiler === 'ocamlc' : true,
-  'Building for JS required the --compiler=ocamlc (which is the default)'
+  buildConfig.jsCompile ? buildConfig.compiler === 'byte' : true,
+  'Building for JS required the --compiler=byte (which is the default)'
 );
 invariant(
-  buildConfig.compiler === 'ocamlc' ||
-  buildConfig.compiler === 'ocamlopt',
-  'Must supply either --compiler=ocamlc or --compiler=ocamlopt'
+  buildConfig.compiler === 'byte' ||
+  buildConfig.compiler === 'native',
+  'Must supply either --compiler=byte or --compiler=native'
 );
 
 var VALID_DOCS = ['html', 'latex', 'texi', 'man', 'dot'];
@@ -92,12 +106,6 @@ var notEmpty = function(o) {
   return o !== null && o !== undefined;
 };
 
-var CWD = process.cwd();
-var OCAMLDEP = 'ocamldep';
-var OCAMLLEX = 'ocamllex';
-var OCAMLYACC = 'ocamlyacc';
-var OCAMLDOC = 'ocamldoc';
-var OCAMLFIND = 'ocamlfind';
 
 var makeSearchPathStrings = function(arr) {
   return arr.map(function(dep) {
@@ -106,7 +114,7 @@ var makeSearchPathStrings = function(arr) {
 };
 
 var objectExtension = function(buildConfig) {
-  if (buildConfig.compiler === 'ocamlopt') {
+  if (buildConfig.compiler === 'native') {
     return '.cmx';
   } else {
     return '.cmo';
@@ -859,6 +867,7 @@ var getFindlibCommand = function(packageConfig, toolchainCommand, linkPkg) {
     '';
 
   var findLib = [findlibBuildCommand, linkPkg ? '-linkpkg' : '', findlibFlags, '-only-show'].join(' ');
+  console.log(findLib);
 
   // Trimming off the white space is critical, since this will usually return a
   // trailing newline which makes the command unusable
@@ -1182,7 +1191,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     );
 
     var compileCommand =
-      getFindlibCommand(packageConfig, buildConfig.compiler, false);
+      getFindlibCommand(packageConfig, programForCompiler(buildConfig.compiler), false);
 
     var singleFileCompile =
       [compileCommand]
@@ -1248,13 +1257,13 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     var rebuggerArtifact = packageConfig === rootPackageConfig &&
       buildConfig.rebuggerPath !== null &&
       buildConfig.forDebug &&
-      buildConfig.compiler === 'ocamlc' ?
+      buildConfig.compiler === 'byte' ?
       buildForRebuggerScript(packageConfig, rootPackageConfig, buildConfig) :
       null;
     var rebuggerVimArtifact = packageConfig === rootPackageConfig &&
       buildConfig.rebuggerPath !== null &&
       buildConfig.forDebug &&
-      buildConfig.compiler === 'ocamlc' ?
+      buildConfig.compiler === 'byte' ?
       buildForRebuggerVimScript(packageConfig, rootPackageConfig, buildConfig) :
       null;
 
@@ -1271,7 +1280,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
      * appears to support both -open and -no-alias-deps.
      */
     var docArtifact = buildForDoc(packageConfig, rootPackageConfig, buildConfig);
-    var findlibDocCommand = getFindlibCommand(packageConfig, OCAMLDOC, false);
+    var findlibDocCommand = getFindlibCommand(packageConfig, programForCompiler(OCAMLDOC), false);
     var allDocFlags =
       docFlags.concat(['-' + buildConfig.doc])
       .concat(['-colorize-code', '-all-params']);
@@ -1350,7 +1359,7 @@ var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildCo
     prevTransitiveArtifacts.push(buildArtifact(autoGenAliases.genSourceFiles.internalImplementation, buildConfig, packageConfig));
     prevTransitiveArtifacts.push.apply(prevTransitiveArtifacts, justTheModuleArtifacts);
     // The root package should be runable
-    var findlibLinkCommand = getFindlibCommand(packageConfig, buildConfig.compiler, true);
+    var findlibLinkCommand = getFindlibCommand(packageConfig, programForCompiler(buildConfig.compiler), true);
     var compileExecutableCommand = !executableArtifact ? '' :
       [findlibLinkCommand]
       .concat(['-o', executableArtifact])
@@ -1890,7 +1899,7 @@ function buildTree(tree) {
           })
         });
       };
-      var findlibOCamldepCommand = getFindlibCommand(packageConfig, OCAMLDEP, false);
+      var findlibOCamldepCommand = getFindlibCommand(packageConfig, programForCompiler(OCAMLDEP), false);
       log('> Computing dependencies for ' + packageConfig.packageName + '\n\n');
       var preprocessor = packageConfig.packageJSON.CommonML.preprocessor;
       var cmd =
