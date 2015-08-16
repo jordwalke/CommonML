@@ -867,7 +867,6 @@ var getFindlibCommand = function(packageConfig, toolchainCommand, linkPkg) {
     '';
 
   var findLib = [findlibBuildCommand, linkPkg ? '-linkpkg' : '', findlibFlags, '-only-show'].join(' ');
-  console.log(findLib);
 
   // Trimming off the white space is critical, since this will usually return a
   // trailing newline which makes the command unusable
