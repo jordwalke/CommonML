@@ -23,8 +23,6 @@
   namespace).
 - Developing/depending on local packages is the same as developing against
   remote dependencies. (Just use the standard `npm link` command).
-- `CommonML` autogenerates autocompletion for internal modules and dependencies
-  in addition to docs.
 
 >> This is merely an experiment that explores an OCaml based compilation
 workflow based on the familiar `CommonJS`. `OPAM` is the official, high
@@ -33,10 +31,6 @@ project for real development.  This is only intended for people who really want
 to try out OCaml development with their familiar `CommonJS`
 workflow/namespacing.
 
-
-**Automatically namespaces dependencies and generates docs**
-
-<img src="https://raw.githubusercontent.com/jordwalke/CommonML/master/img/CommonMLDoc.png" />
 
 **Automatically generates autocomplete for dependencies**
 
@@ -74,9 +68,6 @@ Check out the `package.json` file to see that it depends on a couple of other
     # Build and Run
     node node_modules/CommonML/build.js
     ./_build_byte/MyProject/myProject.out
-
-    # Build some docs (open the link it generates)
-    node node_modules/CommonML/build.js --doc=html
 
     # If you have OCaml's Vim/Emacs Merlin plugin installed, editing
     # any of the example files will now have working autocomplete.
@@ -188,13 +179,10 @@ intermediate build artifacts for dependencies are placed at
     ./_build_native/YourProject/yourProject.out
 
 
-*Build beautiful docs:(From `YourProject` root)*
+*Preprocess all `.mly/mll` for `yacc` and `lex`*
 
-    # Add the [--doc] command to any build command
-    # valid options are `html`, `latex`, `texi`, `man`, `dot`.
-    # Recursively builds documentation for all dependencies as well.
-    node node_modules/CommonML/build.js --compiler=byte --doc=html
-    open _build_byte/YourProject/yourProject.doc/index.html
+    # See example project TAPLArith
+    node node_modules/CommonML/build.js --compiler=byte --yacc=true
 
 
 *To enable stack traces:(From `YourProject` root)*
@@ -374,8 +362,7 @@ how to compile, run, and be depended on by other packages.
         "findlibPackages": [
           {"dependency": "comparelib"},
           {"syntax": "comparelib.syntax"}
-        ],
-        "docFlags": ["-css-style", "docStyle.css"]
+        ]
       }
     }
 
@@ -430,9 +417,9 @@ Goals:
 
 - Installing a package should *always* be as simple as listing it as a
   dependency in `package.json` and running `npm install`. It should install
-  everything you need to be able to build, run and generate documentation.
-  This isn't always possible for huge projects, but `CommonML` is for the
-  subset of projects for which it *is* possible.
+  everything you need to be able to build, run and (eventually) generate
+  documentation. This isn't always possible for huge projects, but `CommonML`
+  is for the subset of projects for which it *is* possible.
 
 *Yes, `CommonML` currently relies on having `OCaml/nodeJS` installed on your system.
 One thing at a time.
