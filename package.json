@@ -4,7 +4,9 @@
   "description": "Simple My Project example in OCaml",
   "license": "MIT",
   "dependencies": {
+    "asciitree": "1.0.0",
     "whereis": "0.4.0",
+    "async": "1.4.2",
     "cli-color": "0.3.2",
     "optimist": "0.6.1"
   }

@@ -1,4 +1,6 @@
+var async = require('async');
 var child_process = require('child_process');
+var asciitree = require('asciitree');
 var fs = require('fs');
 var exec = require('child_process').exec;
 var path = require('path');
@@ -6,7 +8,7 @@ var args = process.argv;
 var optimist = require('optimist');
 var clc = require('cli-color');
 var whereis = require('whereis');
-
+var colors = require('colors/safe');
 var argv = optimist.argv;
 
 var STYLE = path.join(__dirname, 'docGenerator', 'docStyle.css');
@@ -24,6 +26,8 @@ var cliConfig = {
   hidePath: argv.hidePath,
   silent: argv.silent
 };
+
+var emptyResult = {commands: null, successfulResults: null, err: null};
 
 var programForCompiler = function(comp) {
   return comp === 'byte' ? OCAMLC :
@@ -44,7 +48,9 @@ var actualBuildDirForDocs = function(buildConfig) {
 };
 
 var buildConfig = {
+  yacc: argv.yacc === 'true',
   compiler: argv.compiler || 'byte',
+  concurrency: argv.concurrency || 4,
   buildDir: argv.buildDir || '_build',
   doc: argv.doc || false,
   forDebug: argv.forDebug === 'true',
@@ -58,6 +64,9 @@ function invariant(bool, msg) {
     throw new Error(msg);
   }
 }
+var notEmptyString = function(s) {
+  return s !== '';
+};
 invariant(
   !('forDebug' in argv) || argv.forDebug === 'true' || argv.forDebug === 'false'
 );
@@ -90,6 +99,8 @@ invariant(
 
 
 var validateFlags = function(compileFlags, linkFlags, packageName) {
+  compileFlags = compileFlags || [];
+  linkFlags = linkFlags || [];
   if (compileFlags.indexOf('-g') !== -1 || linkFlags.indexOf('-g') !== -1) {
     throw new Error(
       'A project ' + packageName + ' has debug link/compile flags ' +
@@ -98,6 +109,111 @@ var validateFlags = function(compileFlags, linkFlags, packageName) {
     );
   }
 };
+
+var traversePackagesInOrderImpl = function(visited, resourceCache, rootPackageName, cb) {
+  if (!visited[rootPackageName]) {
+    visited[rootPackageName] = true;
+    var subpackageNames = resourceCache[rootPackageName].subpackageNames;
+    for (var i = 0; i < subpackageNames.length; i++) {
+      var subpackageName = subpackageNames[i];
+      traversePackagesInOrderImpl(visited, resourceCache, subpackageName, cb);
+    }
+    cb(rootPackageName);
+  }
+};
+var traversePackagesInOrder = function(resourceCache, rootPackageName, cb) {
+  traversePackagesInOrderImpl({}, resourceCache, rootPackageName, cb);
+};
+
+/**
+ * Like `traversePackagesInOrder`, but visits the same nodes multiple times.
+ */
+var traversePackagesInOrderRedundantly = function(resourceCache, rootPackageName, cb) {
+  var subpackageNames = resourceCache[rootPackageName].subpackageNames;
+  for (var i = 0; i < subpackageNames.length; i++) {
+    var subpackageName = subpackageNames[i];
+    traversePackagesInOrderRedundantly(resourceCache, subpackageName, cb);
+  }
+  cb(rootPackageName);
+};
+
+var somePackageResultNecessitatesRelinking = function(resourceCache, rootPackageName, buildPackagesResultsCache, currentBuildId) {
+  var foundOne = false;
+  traversePackagesInOrder(resourceCache, rootPackageName, function(packageName) {
+    if (buildPackagesResultsCache.versionedResultsByPackageName[packageName].lastBuildIdEffectingProject === currentBuildId) {
+      foundOne = true;
+    }
+  });
+  return foundOne;
+};
+
+var drawBuildGraph =  function(resourceCache, resultsCache, rootPackageName) {
+  var isBlocked = function(resultsCache, packageName) {
+    var currentBuildId = resultsCache.currentBuildId;
+    var versionedResults = resultsCache.versionedResultsByPackageName[packageName];
+    var errorState = versionedResults.results.errorState;
+    return errorState === NodeErrorState.SubnodeFail;
+  };
+  var isFailed = function(resultsCache, packageName) {
+    var currentBuildId = resultsCache.currentBuildId;
+    var versionedResults = resultsCache.versionedResultsByPackageName[packageName];
+    var errorState = versionedResults.results.errorState;
+    return errorState === NodeErrorState.NodeFail;
+  };
+  var isRebuilt = function(resultsCache, packageName) {
+    var currentBuildId = resultsCache.currentBuildId;
+    var versionedResults = resultsCache.versionedResultsByPackageName[packageName];
+    var lastBuildIdEffectingProject = versionedResults.lastBuildIdEffectingProject;
+    var lastBuildIdEffectingDependents = versionedResults.lastBuildIdEffectingDependents;
+    var lastSuccessfulBuildId = versionedResults.lastSuccessfulBuildId;
+    return !isBlocked(resultsCache, packageName) && !isFailed(resultsCache, packageName) && (lastBuildIdEffectingProject === currentBuildId);
+  };
+
+  var getTitle = function(resultsCache, packageName) {
+    if (isBlocked(resultsCache, packageName)) {
+      return packageName + "☐ ";
+    } else if (isFailed(resultsCache, packageName)) {
+      return packageName + "☒ ";
+    } else {
+      if (isRebuilt(resultsCache, packageName)) {
+        return packageName + "☑ ";
+      } else {
+        return packageName;
+      }
+    }
+  };
+
+  var getBuildGraph = function(seenPackageName, resourceCache, resultsCache, packageName) {
+    var title = getTitle(resultsCache, packageName);
+    if (seenPackageName[packageName]) {
+      return title;
+    }
+    seenPackageName[packageName] = true;
+    var subgraphs = [];
+    var didSuppress = false;
+    resourceCache[packageName].subpackageNames.forEach(function(name) {
+      if (seenPackageName[name] && !isBlocked(resultsCache, name) && !isFailed(resultsCache, name) && !isRebuilt(resultsCache, name)) {
+        didSuppress = true;
+      } else {
+        subgraphs.push(getBuildGraph(seenPackageName, resourceCache, resultsCache, name));
+      }
+    });
+    return [title].concat(!didSuppress ? subgraphs : subgraphs.concat(['⋯']));
+  };
+
+  var executableTitle = "Executable(" + getTitle(resultsCache, rootPackageName) + ")";
+  var tree = [executableTitle, getBuildGraph({}, resourceCache, resultsCache, rootPackageName)];
+  log();
+  logTitle("Build Graph:");
+  log("⋯ = Uninteresting nodes - already shown elsewhere, no build operations.");
+  log("☑ = Rebuild Success");
+  log("☒ = Rebuild Failed");
+  log("☐ = Rebuild Blocked");
+  log();
+  log(asciitree(tree));
+  log();
+};
+
 var buildBypass = {
   skipDependencyAnalysis: !!argv.skipDependencyAnalysis
 };
@@ -222,6 +338,7 @@ var arraysDiffer = function(one, two) {
       return true;
     }
   }
+  return false;
 };
 
 function removeBreaks(str) {
@@ -282,21 +399,6 @@ var buildArtifact = function(filePath, buildConfig, packageConfig) {
     'NEVER_HAPPENS';
 };
 
-var buildForDoc = function(packageConfig, rootPackageConfig, buildConfig) {
-  var unsanitizedPackPath = path.join(
-    packageConfig.realPath,
-    lowerBase(packageConfig.packageName) + '.doc'
-  );
-  var sanitizedPackPath = sanitizedArtifactForDoc(
-    unsanitizedPackPath,
-    packageConfig,
-    rootPackageConfig,
-    buildConfig
-  );
-  return sanitizedPackPath;
-};
-
-
 var buildForExecutable = function(packageConfig, rootPackageConfig, buildConfig) {
   var unsanitizedExecPath =
     path.join(packageConfig.realPath, lowerBase(packageConfig.packageName) + '.out');
@@ -309,25 +411,6 @@ var buildForExecutable = function(packageConfig, rootPackageConfig, buildConfig)
 var buildForModuleMap = function(packageConfig, rootPackageConfig, buildConfig) {
   var unsanitizedExecPath =
     path.join(packageConfig.realPath, lowerBase(packageConfig.packageName) + '.moduleMap');
-  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
-};
-
-// Output for script that boots up a graphics debugger. It needs to know which
-// globally namespaced module names (that the debugger speaks in terms of) map
-// to which original files on disk.
-var buildForRebuggerScript = function(packageConfig, rootPackageConfig, buildConfig) {
-  var unsanitizedExecPath =
-    path.join(packageConfig.realPath, lowerBase(packageConfig.packageName) + '.rebugger');
-  return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
-};
-
-// The debugger will need to load up the same mapping inside of Vim to control
-// the graphical debugger from within Vim. This generates a vim script that
-// makes that happen (in theory).
-// Note: The graphical debugger does not yet work - this is all just setup.
-var buildForRebuggerVimScript = function(packageConfig, rootPackageConfig, buildConfig) {
-  var unsanitizedExecPath =
-    path.join(packageConfig.realPath, lowerBase(packageConfig.packageName) + '.vim');
   return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
 };
 
@@ -364,20 +447,6 @@ var getPublicSourceDirs = function(unsanitizedPaths, packageConfig) {
   return publicModulePaths.map(path.dirname.bind(path));
 };
 
-var getFileCopyCommandsForDoc = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
-  return unsanitizedPaths.map(function(unsanitizedPath) {
-    if (!isSourceFile(unsanitizedPath, packageConfig)) {
-      throw new Error('Do not know what to do with :' + unsanitizedPath);
-    }
-    return [
-      'cp',
-      unsanitizedPath,
-      sanitizedArtifactForDoc(unsanitizedPath, packageConfig, rootPackageConfig, buildConfig),
-    ].join(' ');
-  });
-};
-
-
 var createAliases = function(unsanitizedPaths, packageConfig) {
   return unsanitizedPaths.map(function(unsanitizedPath) {
     if (maybeSourceKind(unsanitizedPath, packageConfig) !== '.ml') {
@@ -392,6 +461,7 @@ var createAliases = function(unsanitizedPaths, packageConfig) {
     return comment + alias;
   }).join('\n');
 };
+
 var autogenAliasesCommand = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
   var internalModuleName = aliasPackModuleName(packageConfig, true);
   var internalAliases =
@@ -487,21 +557,6 @@ var getNamespacedFileOutputCommands = function(unsanitizedPaths, packageConfig, 
   });
 };
 
-var getCompileForDocsPreprocessedFileList = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
-  return unsanitizedPaths.map(function(unsanitizedPath) {
-    invariant(isSourceFile(unsanitizedPath, packageConfig), 'Do not know what to do with :' + unsanitizedPath);
-    var extensionFlags = getSingleFileCompileExtensionFlags(unsanitizedPath, packageConfig);
-    var sanitizedPath =
-      sanitizedArtifactForDoc(unsanitizedPath, packageConfig, rootPackageConfig, buildConfig);
-    return extensionFlags
-      .concat([sanitizedPath]).join(' ');
-  }).join(' ');
-};
-
-var getCompileForDocsOutputCommands = function(compileCommand, unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
-  return compileCommand + getCompileForDocsPreprocessedFileList(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig);
-};
-
 /**
  * Like `getFileOutputs`, but just the output files for ML files and not the
  * commands.
@@ -535,20 +590,6 @@ var getPublicSanitizedBuildDirs = function(packageConfig, rootPackageConfig, bui
   ];
 };
 
-
-var getSanitizedOutputDirsForDoc = function(unsanitizedPaths, packageConfig, rootPackageConfig, buildConfig) {
-  var seen = {};
-  return unsanitizedPaths.map(function(unsanitizedPath) {
-    var sanitized =
-      sanitizedArtifactForDoc(buildArtifact(unsanitizedPath, buildConfig, rootPackageConfig), packageConfig, rootPackageConfig, buildConfig);
-    var dirName = path.dirname(sanitized);
-    if (seen[dirName]) {
-      return null;
-    }
-    seen[dirName] = true;
-    return dirName;
-  }).filter(function(o) {return o !== null;});
-};
 
 var entireActualBuildDir = function(rootPackageConfig, buildConfig) {
   return path.resolve(rootPackageConfig.realPath, actualBuildDir(buildConfig));
@@ -636,14 +677,6 @@ var aliasAndExecutableArtifactDir = function(packageConfig, rootPackageConfig, b
   return sanitizedDependencyBuildDirectory(packageConfig, rootPackageConfig, buildConfig);
 };
 
-var sanitizedArtifactForDoc = function(absPath, packageConfig, rootPackageConfig, buildConfig) {
-  var originalRelativeToItsPackage = path.relative(packageConfig.realPath, absPath);
-  return path.resolve(
-    sanitizedDependencyBuildDirectoryForDoc(packageConfig, rootPackageConfig, buildConfig),
-    originalRelativeToItsPackage
-  );
-};
-
 var baseNameBase = function(filePath) {
   return path.basename(filePath, path.extname(filePath));
 };
@@ -654,52 +687,83 @@ var upperBasenameBase = function(filePath) {
 };
 
 var ensureNotMisCase = function(packageName, validateThis, propperCases) {
+  var foundErrors = [];
   var lowercaseVersionOfPropper = {};
   for (var key in propperCases) {
     lowercaseVersionOfPropper[key.toLowerCase()] = true;
   }
   for (var keyInQuestion in validateThis) {
-    if (lowercaseVersionOfPropper[keyInQuestion.toLowerCase()] &&
-        !(keyInQuestion in propperCases)) {
-      invariant(
-        false,
+    if (lowercaseVersionOfPropper[keyInQuestion.toLowerCase()] && !(keyInQuestion in propperCases)) {
+      foundErrors.push(
         packageName +
-          ' has a mispelled field in its package.json/CommonML (check the casing of ' +
-          keyInQuestion + ').'
+        ' has a mispelled field in its package.json/CommonML (check the casing of ' +
+        keyInQuestion +
+        ').'
       );
     }
   }
+  return foundErrors;
 };
 
-var verifyPackageConfig = function(packageConfig) {
-  var realPath = packageConfig.realPath;
-  var packageName = packageConfig.packageName;
-  var packageJSON = packageConfig.packageJSON;
+var verifyPackageConfig = function(packageResource, resourceCache) {
+  var realPath = packageResource.realPath;
+  var packageName = packageResource.packageName;
+  var packageJSON = packageResource.packageJSON;
   var CommonML = packageJSON.CommonML;
   var msg = 'Invalid package ' + packageName + ' at ' + realPath + '. ';
 
   if (!CommonML) {
     // Not a CommonML package
-    return;
+    return false;
   }
 
-  var sourceFiles = packageConfig.packageResources.sourceFiles;
-  for (var i = 0; i < sourceFiles.length; i++) {
-    var sourceFile = sourceFiles[i];
-    var extName = path.extname(sourceFile);
-    var kind = maybeSourceKind(sourceFile, packageConfig);
-    if (kind === '.mli' || kind === '.ml') {
-      // Chop off any potential 'ml'
-      var basenameBase = path.basename(sourceFile, extName);
-      invariant(
-        basenameBase.toLowerCase() !== packageConfig.packageName.toLowerCase(),
-        msg + 'Package cannot contain module with same name as project ' +
-        '(' + sourceFile + ')'
+  var foundErrors = [];
+  var subpackageNames = packageResource.subpackageNames;
+  for (var i = 0; i < subpackageNames.length; i++) {
+    var subpackageName = subpackageNames[i];
+    var subpackage = resourceCache[subpackageName];
+    if(packageJSON.dependencies && !packageJSON.dependencies[subpackageName]) {
+      foundErrors.push(
+        'Package named "' + subpackageName + '" was found in ' + packageName +
+        '\'s node_module directory, but ' + packageName + ' doesn\'t depend on ' + subpackageName +
+        ': \n\n' +
+        '  1. Either edit ' + path.join(realPath, 'package.json') + ' to include ' +
+        subpackageName + ' as a dependency.\n'  +
+        '  2. Or remove/unlink the package named ' + subpackageName +
+        ' inside ' + path.join(realPath, 'node_modules') + ' .'
       );
     }
   }
 
-  ensureNotMisCase(packageName, CommonML, {
+  for (var commonMLDependencyName in packageJSON.dependencies) {
+    if (commonMLDependencyName !== 'CommonML' && subpackageNames.indexOf(commonMLDependencyName) === -1) {
+      foundErrors.push(
+        packageName + ' depends on ' + commonMLDependencyName + ' but ' + commonMLDependencyName +
+        ' isn\'t installed in '+ path.join(realPath, 'node_modules') + ':\n\n' +
+        '  1. Either run npm install (or npm link ' + commonMLDependencyName + ') from within ' + realPath + '.\n' +
+        '  2. Or remove ' + subpackageName + ' as a dependency of ' + packageName + ' by editing ' + path.join(realPath, 'package.json')
+      );
+    }
+  }
+
+  var sourceFiles = packageResource.packageResources.sourceFiles;
+  for (var i = 0; i < sourceFiles.length; i++) {
+    var sourceFile = sourceFiles[i];
+    var extName = path.extname(sourceFile);
+    var kind = maybeSourceKind(sourceFile, packageResource);
+    if (kind === '.mli' || kind === '.ml') {
+      // Chop off any potential 'ml'
+      var basenameBase = path.basename(sourceFile, extName);
+      if (basenameBase.toLowerCase() === packageResource.packageName.toLowerCase()) {
+        foundErrors.push(
+          msg + 'Package cannot contain module with same name as project ' +
+          '(' + sourceFile + ')'
+        );
+      }
+    }
+  }
+
+  foundErrors = foundErrors.concat(ensureNotMisCase(packageName, CommonML, {
     exports: true,
     compileFlags: true,
     linkFlags: true,
@@ -708,74 +772,75 @@ var verifyPackageConfig = function(packageConfig) {
     extensions: true,
     preprocessor: true,
     findlibPackages: true
-  });
+  }));
 
   var htmlPage = CommonML.jsPlaceBuildArtifactsIn;
   if (htmlPage) {
-    invariant(typeof htmlPage === 'string', packageName + ' htmlPage field must be a string');
-    invariant(
-      htmlPage.charAt(0) !== '/' && htmlPage.charAt(0) !== '.',
-      packageName + ' htmlPage must be relative to the package root with no leading slash or dot'
-    );
-    invariant(
-      htmlPage.charAt(htmlPage.length - 1) !== '/',
-      packageName + 'has a jsPlaceBuildArtifactsIn that ends with a slash. Remove the slash'
-    );
-  }
-
-  invariant(packageConfig.realPath, msg + 'No path for package.');
-  invariant(
-    packageName && packageName.length && packageName[0].toUpperCase() === packageName[0],
-    msg + 'package.json `name` must begin with a capital letter.'
-  );
-  invariant(packageJSON, msg + 'Must have package.json');
-  invariant(
-    !packageJSON.CommonMl &&
-    !packageJSON.commonMl &&
-    !packageJSON.commonML &&
-    !packageJSON.commonml,
-    msg + 'Fix spelling in package.json: It should be spelled "CommonML".'
-  );
-  invariant(CommonML.exports, msg + 'Must specify exports');
-  invariant(
-    !CommonML.export,
-    msg + '"export" is not a valid field of "CommonML" in package.json'
-  );
-  invariant(
-    !CommonML.export,
-    msg + '"export" is not a valid field of "CommonML" in package.json'
-  );
-  CommonML.exports.forEach(function(exportName) {
-    invariant(exportName !== '', 'package.json specifies an exported CommonML module that is the empty string');
-    invariant(path.extname(exportName) === '', msg + 'Exports must be module names, not files');
-    invariant(
-      exportName[0].toUpperCase() === exportName[0],
-      msg + 'Exports must be module names - capitalized leading chars.'
-    );
-    invariant(
-      basenameBase !== lowerBase(packageConfig.packageName),
-      msg + 'Cannot export the same module name as the package name:' + exportName
-    );
-  });
-
-  var extensions = packageConfig.packageJSON.CommonML.extensions;
-  if (CommonML.extensions) {
-    for (var i = 0; i < extensions && extensions.length; i++) {
-      var extension = extensions[i];
-      invariant(
-        extension['interface'] && extension['implementation'],
-        packageName + ' has misformed extensions'
+    if(typeof htmlPage !== 'string') {
+      foundErrors.push(packageName + ' htmlPage field must be a string');
+    }
+    if(htmlPage.charAt(0) === '/' || htmlPage.charAt(0) === '.') {
+      foundErrors.push(
+        packageName + ' htmlPage must be relative to the package root with no leading slash or dot'
       );
-      invariant(
-        extension['interface'].charAt(0) === '.' && extension['implementation'].charAt(0) === '.',
-        packageName + ' has extensions that do not start with a (.) - ' +
-        'extensions should look like [{"intf": ".blai", "impl": ".bla"}]'
+    }
+    if(htmlPage.charAt(htmlPage.length - 1) === '/') {
+      foundErrors.push(
+        packageName + 'has a jsPlaceBuildArtifactsIn that ends with a slash. Remove the slash'
       );
     }
   }
+
+  if(!packageResource.realPath) {
+    foundErrors.push(msg + 'No path for package.');
+  }
+  if(!packageName || !packageName.length || packageName[0].toUpperCase() !== packageName[0]) {
+    foundErrors.push(msg + 'package.json `name` must begin with a capital letter.');
+  }
+  if(!packageJSON) {
+    foundErrors.push(msg + 'Must have package.json');
+  }
+  if(packageJSON.CommonMl ||
+     packageJSON.commonMl ||
+     packageJSON.commonML ||
+     packageJSON.commonml) {
+    foundErrors.push(msg + 'Fix spelling in package.json: It should be spelled "CommonML".');
+  }
+  if(!CommonML.exports) {
+    foundErrors.push(msg + 'Must specify exports');
+  }
+  if(CommonML.export) {
+    foundErrors.push(msg + '"export" is not a valid field of "CommonML" in package.json');
+  }
+  CommonML.exports.forEach(function(exportName) {
+    exportName === '' && foundErrors.push('package.json specifies an exported CommonML module that is the empty string');
+    path.extname(exportName) !== '' && foundErrors.push(msg + 'Exports must be module names, not files');
+    exportName[0].toUpperCase() !== exportName[0] && foundErrors.push(msg + 'Exports must be module names - capitalized leading chars.');
+    basenameBase === lowerBase(packageResource.packageName) &&
+      foundErrors.push(msg + 'Cannot export the same module name as the package name:' + exportName);
+  });
+
+  var extensions = packageResource.packageJSON.CommonML.extensions;
+  if (CommonML.extensions) {
+    for (var i = 0; i < extensions && extensions.length; i++) {
+      var extension = extensions[i];
+      !(extension['interface'] && extension['implementation']) &&
+        foundErrors.push(packageName + ' has misformed extensions');
+      !(extension['interface'].charAt(0) === '.' && extension['implementation'].charAt(0) === '.') &&
+        packageName + ' has extensions that do not start with a (.) - ' +
+        'extensions should look like [{"intf": ".blai", "impl": ".bla"}]';
+    }
+  }
+  var errorMessage = foundErrors.join('\n\n');
+  if (foundErrors.length) {
+    logError('\n' + errorMessage + '\n');
+  }
+  return foundErrors.length !== 0;
 };
 
-var generateDotMerlinForPackage = function(autoGenAliases, moduleArtifacts, rootPackageConfig, packageConfig, buildConfig) {
+var generateDotMerlinForPackage = function(resourceCache, autogenAliases, moduleArtifacts, rootPackageName, packageName ) {
+  var packageConfig = resourceCache[packageName];
+  var rootPackageConfig = resourceCache[rootPackageName];
   var commonML = packageConfig.packageJSON.CommonML;
   var linkFlags = commonML.linkFlags;
   var compileFlags = commonML.compileFlags || [];
@@ -788,11 +853,12 @@ var generateDotMerlinForPackage = function(autoGenAliases, moduleArtifacts, root
   var filteredCompilerFlags = compileFlags.filter(function(f) {
     return f !== '-i' && f !== '-g' && f !== '-bin-annot'; // This screws up merlin
   });
-  var flgs = ['FLG ' + filteredCompilerFlags.join(' ') + ' -open ' + autoGenAliases.internalModuleName];
+  var flgs = ['FLG ' + filteredCompilerFlags.join(' ') + ' -open ' + autogenAliases.internalModuleName];
 
   var depSourceDirs = [];
-  for (var subpackageName in packageConfig.subpackages) {
-    var subpackage = packageConfig.subpackages[subpackageName];
+  for (var i = 0; i < packageConfig.subpackageNames.length; i++) {
+    var subpackageName = packageConfig.subpackageNames[i];
+    var subpackage = resourceCache[subpackageName];
     // This messes merlin up because two different projects can have the same
     // module name (when packed). Once that is resolved this should work.
     // https://github.com/the-lambda-church/merlin/issues/284
@@ -802,7 +868,7 @@ var generateDotMerlinForPackage = function(autoGenAliases, moduleArtifacts, root
   }
   var merlinBuildDirs =
     getSanitizedBuildDirs(packageConfig, rootPackageConfig, buildConfig)
-    .concat(sanitizedImmediateDependenciesPublicPaths(packageConfig, rootPackageConfig, buildConfig));
+    .concat(sanitizedImmediateDependenciesPublicPaths(resourceCache, packageConfig, rootPackageConfig, buildConfig));
   // For now, we build right where we have source files
   var buildLines = merlinBuildDirs.map(function(src) {return 'B ' + src;});
   var merlinSourceDirs =
@@ -833,6 +899,15 @@ var boxMsg = function(txt) {
   ].join('\n');
 };
 
+var box = function(txt) {
+  var lines = repeat(txt.length, '-');
+  return [
+    '+' + lines + '+',
+    '|' + txt + '|',
+    '+' + lines + '+'
+  ].join('\r\n');
+};
+
 var ocbFlagsForPackageCommand = function(command) {
   var dep = command.dependency;
   var syntax = command.syntax;
@@ -854,13 +929,13 @@ var ocbFlagsForPackageCommand = function(command) {
  * pretty good idea anyway. If you don't supply `-linkpkg` nothing works when
  * it comes time to link.
  */
-var getFindlibCommand = function(packageConfig, toolchainCommand, linkPkg) {
-  var commonML = packageConfig.packageJSON.CommonML;
+var getFindlibCommand = function(packageResource, toolchainCommand, linkPkg) {
+  var commonML = packageResource.packageJSON.CommonML;
   var findlibPackages = commonML.findlibPackages;
   var hasFindlibPackages = findlibPackages && findlibPackages.length;
   var findlibBuildCommand = OCAMLFIND + ' ' + toolchainCommand;
   // It appears that using findlib is *faster* than not using it - but if you
-  // add several pacakges, then it's slower.
+  // add several packages, then it's slower.
   var findlibFlags =
     hasFindlibPackages ?
     findlibPackages.map(ocbFlagsForPackageCommand).join(' ') :
@@ -888,16 +963,19 @@ var getFindlibCommand = function(packageConfig, toolchainCommand, linkPkg) {
  * depend on which of your dependencies. Then you could combine that
  * information with the modified time of *interface* files.
  */
-var getFilesNeedingRecompilation = function(resourceCache, packageConfig, buildOrdering) {
-  var cachedResource = resourceCache.byPath[packageConfig.realPath];
-  if (!cachedResource) {
+var getFilesNeedingRecompilation = function(dependencyResults, prevResultsCache, resourceCache, prevResourceCache, packageName) {
+  var lastSuccessfulPackageResource =
+    prevResultsCache.versionedResultsByPackageName[packageName] ?
+    prevResultsCache.versionedResultsByPackageName[packageName].lastSuccessfulPackageResource : null;
+  var buildOrdering = dependencyResults;
+  var packageResource = resourceCache[packageName];
+  if (!lastSuccessfulPackageResource) {
     return buildOrdering;
   }
-  var previousBuildOrdering = cachedResource.ocamldepOutput;
-  var previousSourceFiles = cachedResource.shallowPackageConfig.packageResources.sourceFiles;
-  var previousSourceFileMTimes = cachedResource.shallowPackageConfig.packageResources.sourceFileMTimes;
-  var nextSourceFiles = packageConfig.packageResources.sourceFiles;
-  var nextSourceFileMTimes = packageConfig.packageResources.sourceFileMTimes;
+  var prevSourceFiles = lastSuccessfulPackageResource.packageResources.sourceFiles;
+  var prevSourceFileMTimes = lastSuccessfulPackageResource.packageResources.sourceFileMTimes;
+  var nextSourceFiles = packageResource.packageResources.sourceFiles;
+  var nextSourceFileMTimes = packageResource.packageResources.sourceFileMTimes;
 
   // d represents the first index where we found something different.  By the
   // end of loop, d will be at most the length of array (because of the last
@@ -905,7 +983,7 @@ var getFilesNeedingRecompilation = function(resourceCache, packageConfig, buildO
   var firstChangedIndex = -1;
   for (var d = 0; d < buildOrdering.length; d++) {
     var absPath = buildOrdering[d];
-    var indexInPreviousSourceFiles = previousSourceFiles.indexOf(absPath);
+    var indexInPreviousSourceFiles = prevSourceFiles.indexOf(absPath);
     var indexInNextSourceFiles = nextSourceFiles.indexOf(absPath);
     var nextMTime = nextSourceFileMTimes[indexInNextSourceFiles];
     if (indexInPreviousSourceFiles === -1) {
@@ -913,8 +991,8 @@ var getFilesNeedingRecompilation = function(resourceCache, packageConfig, buildO
       break;
     } else {
       invariant(indexInNextSourceFiles !== -1, 'Cannot find ocamldep supplied source ' + absPath);
-      var previousMTime = previousSourceFileMTimes[indexInPreviousSourceFiles];
-      if (previousMTime !== nextMTime) {
+      var prevMTime = prevSourceFileMTimes[indexInPreviousSourceFiles];
+      if (prevMTime !== nextMTime) {
         firstChangedIndex = d;
         break;
       }
@@ -959,16 +1037,17 @@ var newOrChangedFiles = function(extension, previousFiles, previousMTimes, nextF
  * - It's reasonable to simply recompile all of the `mll`s if any `mly`
  *   changed.
  */
-var getLexYaccFilesRequiringRecompilation = function(resourceCache, packageConfig) {
-  var cachedResource = resourceCache.byPath[packageConfig.realPath];
-  var previousSourceFiles = cachedResource ?
-    cachedResource.shallowPackageConfig.packageResources.sourceFiles :
+var getLexYaccFilesRequiringRecompilation = function(resourceCache, prevResourceCache, packageName) {
+  var prevCachedResource = prevResourceCache[packageName];
+  var cachedResource = resourceCache[packageName];
+  var previousSourceFiles = prevCachedResource ?
+    prevCachedResource.packageResources.sourceFiles :
     [];
-  var previousSourceFileMTimes = cachedResource ?
-    cachedResource.shallowPackageConfig.packageResources.sourceFileMTimes :
+  var previousSourceFileMTimes = prevCachedResource ?
+    prevCachedResource.packageResources.sourceFileMTimes :
     [];
-  var nextSourceFiles = packageConfig.packageResources.sourceFiles;
-  var nextSourceFileMTimes = packageConfig.packageResources.sourceFileMTimes;
+  var nextSourceFiles = cachedResource.packageResources.sourceFiles;
+  var nextSourceFileMTimes = cachedResource.packageResources.sourceFileMTimes;
   return {
     lex: newOrChangedFiles(
       '.mll',
@@ -987,11 +1066,13 @@ var getLexYaccFilesRequiringRecompilation = function(resourceCache, packageConfi
   };
 };
 
-var sanitizedImmediateDependenciesPublicPaths = function(packageConfig, rootPackageConfig, buildConfig) {
+
+var sanitizedImmediateDependenciesPublicPaths = function(resourceCache, packageConfig, rootPackageConfig, buildConfig) {
   var immediateDependenciesPublicDirs = [];
-  var subpackages = packageConfig.subpackages;
-  for (var subpackageName in subpackages) {
-    var subpackage = subpackages[subpackageName];
+  var subpackageNames = packageConfig.subpackageNames;
+  for (var i = 0; i < subpackageNames.length; i++) {
+    var subpackageName = subpackageNames[i];
+    var subpackage = resourceCache[subpackageName];
     immediateDependenciesPublicDirs.push.apply(
       immediateDependenciesPublicDirs,
       getPublicSanitizedBuildDirs(subpackage, rootPackageConfig, buildConfig)
@@ -1044,508 +1125,6 @@ var getOCamldepFlags = function(packageConfig) {
     .concat(extensionFlags)
     .concat(ppFlags)
     .concat(sourceFileArgs);
-};
-
-
-var getModuleMapCommand = function(filePathByModuleNameByPackageName, moduleMapArtifact) {
-  var lines = [];
-  for (var packageName in filePathByModuleNameByPackageName) {
-    var globalModuleNameAndBuildCommandByFilePath = filePathByModuleNameByPackageName[packageName].globalModuleNameAndBuildCommandByFilePath;
-    for (var filePath in globalModuleNameAndBuildCommandByFilePath) {
-      var globalModuleName = globalModuleNameAndBuildCommandByFilePath[filePath].globalModuleName;
-      var buildCommand = globalModuleNameAndBuildCommandByFilePath[filePath].buildCommand;
-      lines.push(filePath + ':' + buildCommand);
-    }
-  }
-  return 'echo "' + lines.join('\n') + '" > ' + moduleMapArtifact;
-};
-
-var getRebuggerCommand = function(buildConfig, filePathByModuleNameByPackageName, rebuggerArtifact, rebuggerVimArtifact, executableArtifact) {
-  var tokens = [buildConfig.rebuggerPath, executableArtifact];
-  for (var packageName in filePathByModuleNameByPackageName) {
-    var globalModuleNameAndBuildCommandByFilePath = filePathByModuleNameByPackageName[packageName].globalModuleNameAndBuildCommandByFilePath;
-    for (var filePath in globalModuleNameAndBuildCommandByFilePath) {
-      var globalModuleName = globalModuleNameAndBuildCommandByFilePath[filePath].globalModuleName;
-      tokens.push('-M');
-      tokens.push(globalModuleName);
-      tokens.push(filePath);
-    }
-  }
-  tokens.push('-vim');
-  tokens.push(rebuggerVimArtifact);
-  return [
-    'echo "' + tokens.join(' ') + '" > ' + rebuggerArtifact,
-    'chmod 777 '+ rebuggerArtifact
-  ].join('\n');
-};
-
-var getRebuggerVimCommand = function(filePathByModuleNameByPackageName, rebuggerArtifact, executableArtifact) {
-  var lines = [":let g:rebuggerModulesByPath = {}"];
-  for (var packageName in filePathByModuleNameByPackageName) {
-    var globalModuleNameAndBuildCommandByFilePath = filePathByModuleNameByPackageName[packageName].globalModuleNameAndBuildCommandByFilePath;
-    for (var filePath in globalModuleNameAndBuildCommandByFilePath) {
-      var globalModuleName = globalModuleNameAndBuildCommandByFilePath[filePath].globalModuleName;
-      lines.push([":let g:rebuggerModulesByPath['", filePath, "'] = '", globalModuleName, "'"].join(''))
-    }
-  }
-  return 'echo "' + lines.join('\n') + '" > ' + rebuggerArtifact;
-};
-
-var buildScriptFromOCamldep = function(resourceCache, rootPackageConfig, buildConfig, walkResults) {
-  var ret = [];
-  var prevTransitiveArtifacts = [];
-  var filePathByModuleNameByPackageName = {};
-  // TODO: someDependentProjectNeededRecompilationInAWayThatChangedPublicInterface
-  var someDependentProjectNeededRecompilation = false;
-  var compileCommands = walkResults.map(function(result) {
-    var packageConfig = result.packageConfig;
-    var packageName = packageConfig.packageName;
-    // Already built this dependency
-    if (filePathByModuleNameByPackageName[packageName]) {
-      return [];
-    }
-    var buildingLibraryMsg = 'Building library ' + packageConfig.packageName;
-    var buildingDebuggingMsg = 'Building debugging support for ' + packageConfig.packageName;
-    var cachedResource = resourceCache.byPath[packageConfig.realPath];
-    var packageResources = packageConfig.packageResources;
-    var commonML = packageConfig.packageJSON.CommonML;
-    var linkFlags = commonML.linkFlags || [];
-    var compileFlags = commonML.compileFlags || [];
-    var docFlags = commonML.docFlags || [];
-    var tags = commonML.tags;
-
-    validateFlags(compileFlags, linkFlags, packageName);
-
-    var mTimesChanged = getMTimesChanged(resourceCache, packageConfig);
-    var fileSetChanged = getFileSetChanged(resourceCache, packageConfig);
-    var mTimesOrFileSetChanged = mTimesChanged || fileSetChanged;
-    var buildConfigMightChangeCompilation =
-      getBuildConfigMightChangeCompilation(resourceCache, buildConfig);
-    var commonMLChanged = getCommonMLChanged(resourceCache, packageConfig);
-    var projectFilesMightNeedRecompiling =
-      mTimesOrFileSetChanged ||
-      buildConfigMightChangeCompilation ||
-      commonMLChanged;
-
-    var mightNeedSomething =
-      projectFilesMightNeedRecompiling || someDependentProjectNeededRecompilation;
-
-    var ocamldepOrderedSourceFiles = result.ocamldepOutput;
-    // TODO: The only practical way to achieve minimal rebuilds, is to get the
-    // `ocamldep` graph output. It's not as simple as finding changed mtimes of
-    // interfaces (explicit or implicit). An interface myInterface.mli can
-    // `include OtherModule_Intf.S`, so the myInterface.mli did not actually
-    // change. So the only way is to track individual file dependencies within
-    // any single project. For better dependency tracking, we can use
-    // compiler-libs to cache the type of interfact files.
-    //
-    // We can conclude that our package's change won't necessitate
-    // recompilation of packages that depend on it if there is no transitive
-    // dependency between the exported modules' interfaces, and the files that
-    // changed. If there is a transitive dependency, we have no choice but to
-    // assume the change will necessitate recompilation of our package's
-    // dependencies, though we have no way to know for certain.
-    var needsRecompileAllModules =
-      buildConfigMightChangeCompilation || commonMLChanged || someDependentProjectNeededRecompilation ||
-      // If any new file was added, we have to regenerate the autogenerated
-      // aliases files and recompile them. This means we have to recompile
-      // *everything* in the project. We cannot just recompile the aliases
-      // files, and the newly added/changed modules because when it comes time
-      // to link them all together, the older compilations will have
-      // "inconsistent interface"s w.r.t. to autogenerated aliases.
-      // We also make sure to *not* recompile/generate the aliases when no new
-      // module has been added.
-      fileSetChanged;
-    // Same condition ase above
-    var needsRegenerateCompileAliases =
-      buildConfigMightChangeCompilation || commonMLChanged || someDependentProjectNeededRecompilation || fileSetChanged;
-
-    var sourceFilesToRecompile =
-      needsRecompileAllModules ?
-      ocamldepOrderedSourceFiles :
-      getFilesNeedingRecompilation(resourceCache, packageConfig, ocamldepOrderedSourceFiles);
-
-    var needsModuleRecompiles = sourceFilesToRecompile.length > 0;
-
-    var fileOutputDirs = getSanitizedBuildDirs(
-      packageConfig,
-      rootPackageConfig,
-      buildConfig
-    );
-
-    /**
-     * Compiling alias files for public/internal consumption of this module.
-     */
-    var autoGenAliases = autogenAliasesCommand(
-      ocamldepOrderedSourceFiles,
-      packageConfig,
-      rootPackageConfig,
-      buildConfig
-    );
-    var singleFileCompileFlags = getSingleFileCompileFlags(packageConfig, buildConfig, true);
-
-    var searchPaths = makeSearchPathStrings(
-      fileOutputDirs
-      .concat(sanitizedImmediateDependenciesPublicPaths(packageConfig, rootPackageConfig, buildConfig))
-    );
-
-    var compileCommand =
-      getFindlibCommand(packageConfig, programForCompiler(buildConfig.compiler), false);
-
-    var singleFileCompile =
-      [compileCommand]
-      .concat(singleFileCompileFlags)
-      .concat(searchPaths)
-      .concat(['-open', autoGenAliases.internalModuleName]).join(' ') + ' ';
-
-    // The performance of this will be horrible if using ocamlfind with custom
-    // packages - it takes a long time to look those up, and we do it for every
-    // file! In the future, cache the result of the findlib command.
-    var compileModuleOutputs = getNamespacedFileOutputCommands(
-      sourceFilesToRecompile,
-      packageConfig,
-      rootPackageConfig,
-      buildConfig
-    );
-    var compileModulesCommands =
-      singleFileCompile + compileModuleOutputs.map(
-        function(c){return c.compileOutputString;}
-      ).join(' ');
-    filePathByModuleNameByPackageName[packageConfig.packageName] = {
-      globalModuleNameAndBuildCommandByFilePath: {}
-    };
-    compileModuleOutputs.forEach(function(c) {
-      filePathByModuleNameByPackageName[packageConfig.packageName].globalModuleNameAndBuildCommandByFilePath[c.sourcePath] = {
-        globalModuleName: c.globalModuleName,
-        buildCommand: singleFileCompile + c.compileOutputString
-      };
-    });
-
-    // Always repack regardless of what changed it's pretty cheap.
-    var compileAliasesCommand =
-      [compileCommand]
-      .concat(singleFileCompileFlags)
-      // -bin-annot generates .cmt files for the pack which merlin needs to
-      // work correctly.
-      // Need to add -49 so that it doesn't complain because we haven't
-      // actually compiled the namespaced modules yet. They are like forward
-      // declarations in that sense.
-      .concat(['-no-alias-deps -w -49'])
-      .concat(searchPaths)
-      .concat([
-        autoGenAliases.genSourceFiles.internalInterface,
-        autoGenAliases.genSourceFiles.internalImplementation,
-      ])
-      .join(' ');
-
-    var ensureDirectoriesCommand = [
-      'mkdir',
-      '-p',
-    ].concat(fileOutputDirs).join(' ');
-
-
-
-    var executableArtifact = packageConfig === rootPackageConfig ?
-      buildForExecutable(packageConfig, rootPackageConfig, buildConfig) :
-      null;
-
-    var moduleMapArtifact = packageConfig === rootPackageConfig ?
-      buildForModuleMap(packageConfig, rootPackageConfig, buildConfig) :
-      null;
-
-    var rebuggerArtifact = packageConfig === rootPackageConfig &&
-      buildConfig.rebuggerPath !== null &&
-      buildConfig.forDebug &&
-      buildConfig.compiler === 'byte' ?
-      buildForRebuggerScript(packageConfig, rootPackageConfig, buildConfig) :
-      null;
-    var rebuggerVimArtifact = packageConfig === rootPackageConfig &&
-      buildConfig.rebuggerPath !== null &&
-      buildConfig.forDebug &&
-      buildConfig.compiler === 'byte' ?
-      buildForRebuggerVimScript(packageConfig, rootPackageConfig, buildConfig) :
-      null;
-
-    // TODO: docs compilation
-    // Make -g option per task not per project
-    // Test ocamldebug
-    // Fix compile output errors linking to `_build`
-    // TODO: Stop using computing the findlib command several times (once for
-    // doc [even if it's not used], and linking [even if it doesn't occur])
-
-    /**
-     * Documentation. Have to compile a special version without namespaces so
-     * that ocamldoc is not confused! Wait - why is ocamldoc confused? It
-     * appears to support both -open and -no-alias-deps.
-     */
-    var docArtifact = buildForDoc(packageConfig, rootPackageConfig, buildConfig);
-    var findlibDocCommand = getFindlibCommand(packageConfig, programForCompiler(OCAMLDOC), false);
-    var allDocFlags =
-      docFlags.concat(['-' + buildConfig.doc])
-      .concat(['-colorize-code', '-all-params']);
-
-    // TODO: Can we avoid copying entirely? I believe so.
-    var fileCopyCommandsForDoc = getFileCopyCommandsForDoc(
-      sourceFilesToRecompile,
-      packageConfig,
-      rootPackageConfig,
-      buildConfig
-    );
-
-    var fileOutputDirsForDoc = getSanitizedOutputDirsForDoc(
-      ocamldepOrderedSourceFiles,
-      packageConfig,
-      rootPackageConfig,
-      buildConfig
-    );
-    var searchPathsForDocs = makeSearchPathStrings(
-      prevTransitiveArtifacts.map(path.dirname.bind(path))
-      .concat(fileOutputDirsForDoc)
-    );
-    var ensureDirectoryCommandForDoc = [
-      'mkdir',
-      '-p',
-      docArtifact
-    ].join(' ');
-    var ensureDirectoriesCommandForDocIntermediateBuilds = [
-      'mkdir',
-      '-p',
-    ].concat(fileOutputDirsForDoc).join(' ');
-
-    var singleFileCompileForDocs =
-      [compileCommand]
-      .concat(singleFileCompileFlags)
-      .concat(searchPathsForDocs)
-      .concat(['-bin-annot']).join(' ') + ' ';
-
-    var compileNonNamespacedModulesForDocsCommands = getCompileForDocsOutputCommands(
-      singleFileCompileForDocs,
-      sourceFilesToRecompile,
-      packageConfig,
-      rootPackageConfig,
-      buildConfig
-    );
-
-    // The same as compileNonNamespacedModulesForDocsCommands but just the file list
-    var nonNamespacedFileListForDocs = getCompileForDocsPreprocessedFileList(
-      sourceFilesToRecompile,
-      packageConfig,
-      rootPackageConfig,
-      buildConfig
-    );
-
-    var compileActualDocumentationCommand = !buildConfig.doc ? '' :
-      [findlibDocCommand]
-      .concat(searchPathsForDocs)
-      .concat(allDocFlags)
-      .concat(commonML.preprocessor ? ['-pp', commonML.preprocessor] : [])
-      .concat(nonNamespacedFileListForDocs)
-      .concat(['-d', docArtifact])
-      .concat(['-css-style', STYLE])
-      .join(' ');
-
-
-    /**
-     * Dependency tracking.
-     */
-
-    // We could pass all of `ocamldepOrderedSourceFiles`, but that creates
-    // build artifacts. So we can supply all of the already built artifacts
-    // (in the _build) folder, but that won't accept .cmi's so we must only
-    // get the .cmos.
-    var justTheModuleArtifacts =
-      getModuleArtifacts(ocamldepOrderedSourceFiles, packageConfig, rootPackageConfig, buildConfig);
-    prevTransitiveArtifacts.push(buildArtifact(autoGenAliases.genSourceFiles.internalImplementation, buildConfig, packageConfig));
-    prevTransitiveArtifacts.push.apply(prevTransitiveArtifacts, justTheModuleArtifacts);
-    // The root package should be runable
-    var findlibLinkCommand = getFindlibCommand(packageConfig, programForCompiler(buildConfig.compiler), true);
-    var compileExecutableCommand = !executableArtifact ? '' :
-      [findlibLinkCommand]
-      .concat(['-o', executableArtifact])
-      .concat(buildConfig.forDebug ? ['-g'] : [])
-      .concat(linkFlags)
-      .concat(searchPaths)
-      .concat(prevTransitiveArtifacts)
-      .join(' ');
-
-    var compileModuleMapCommand = !moduleMapArtifact ? '' :
-      getModuleMapCommand(filePathByModuleNameByPackageName, moduleMapArtifact);
-    var compileRebuggerVimScriptCommand = !rebuggerVimArtifact ? '' :
-      getRebuggerVimCommand(filePathByModuleNameByPackageName, rebuggerVimArtifact, executableArtifact);
-    var compileRebuggerScriptCommand = !rebuggerArtifact ? '' :
-      getRebuggerCommand(buildConfig, filePathByModuleNameByPackageName, rebuggerArtifact, rebuggerVimArtifact, executableArtifact);
-
-    // Can only build the top level packages into JS - ideally we'd also be
-    // able to dynamically link JS bundles..
-    var shouldCompileExecutableIntoJS = buildConfig.jsCompile && executableArtifact;
-    var placeJsBuildDirInField = packageConfig.packageJSON.CommonML.jsPlaceBuildArtifactsIn;
-    var dirToContainJsBuildDirSymlink = placeJsBuildDirInField ? path.join(packageConfig.realPath, placeJsBuildDirInField) : packageConfig.realPath;
-    var jsBuildDir = entireActualBuildDir(rootPackageConfig, buildConfig) + '_js';
-    var byteCodeBuildDir = entireActualBuildDir(rootPackageConfig, buildConfig);
-    var ensureJsBuildDirCommand = ['mkdir', '-p', jsBuildDir].join(' ');
-    var jsArtifactRelativeForm = './app.js';
-    var jsArtifact = shouldCompileExecutableIntoJS ? path.join(jsBuildDir, 'app.js') : null;
-
-    // We create a fake directory structure at the location the output .js
-    // bundle is generated, such that the directory structure matches the
-    // absolute path to the original source locations. The reason is that
-    // absolute paths in the source maps file will only be supported if loading
-    // the html file locally off disk. If loading the html file off a local web
-    // server, you get hit by the same origin policy. Creating a directory
-    // structure that resembles the absolute paths allows source maps to work
-    // on a local web server but without exposing the root file system. It does
-    // clutter up your `jsPlaceBuildArtifactsIn` directory with one new directory.
-    // var sourceRootSymlinkIsInDir = shouldCompileExecutableIntoJS &&
-    //   path.join(dirToContainJsBuildDirSymlink, byteCodeBuildDir, '..');
-    // var sourceRootSymlinkIsCalled = shouldCompileExecutableIntoJS && path.basename(packageConfig.realPath);
-    // var sourceRootSymlinkPath = shouldCompileExecutableIntoJS && path.join(sourceRootSymlinkIsInDir, sourceRootSymlinkIsCalled);
-    //
-    // var symlinkSourceMapsCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
-    //   sourceRootSymlinkPath,
-    //   packageConfig.realPath
-    // );
-    var symlinkBuildDirCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
-      path.join(dirToContainJsBuildDirSymlink, 'jsBuild'),
-      jsBuildDir
-    );
-
-    // The cp command is such a broken API - there isn't a way to overwrite
-    // an entire directory.
-    // Change into the root directory so that source maps are w.r.t. correct location.
-    var changeDir = shouldCompileExecutableIntoJS && ['cd', jsBuildDir ].join(' ');
-    var buildJSArtifactCommand = shouldCompileExecutableIntoJS && [
-      'js_of_ocaml',
-      '--source-map',
-      '--debug-info',
-      '--pretty',
-      '--linkall',
-      '--noinline',
-      executableArtifact,
-      '-o',
-      jsArtifactRelativeForm
-    ].join(' ');
-
-    var echoJSMessage = [
-      '#',
-      '# JavaScript Package at: ' + jsArtifact,
-      '# ======================================',
-      '#',
-      '# Running in a browser',
-      '# --------------------',
-      '# - Create an index html page (that includes script ./jsBuild/app.js) at :',
-      '#',
-      '#    file:\/\/' + dirToContainJsBuildDirSymlink + '/index.html ',
-      '#',
-      '# - Then you can serve it using python via:',
-      '#',
-      '#    pushd ' + dirToContainJsBuildDirSymlink + ' && python -m SimpleHTTPServer || popd',
-      '#',
-      '# - And open it by clicking on:',
-      '#',
-      '#    http:\/\/localhost:8000\/index.html ',
-      '#',
-      '# - Open in Chrome, open the dev tools, *then* refresh to see source maps.',
-      '#',
-      '# Test in JavaScriptCore',
-      '# -----------------------',
-      '#  /System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Resources/jsc -e "console = {log:print};" -f ' + jsArtifact,
-      '#'
-    ].join('\n');
-
-    var buildJSCommands = (shouldCompileExecutableIntoJS ? [
-      ensureJsBuildDirCommand,
-      changeDir,
-      buildJSArtifactCommand,
-      echoJSMessage
-    ].concat(
-    //   symlinkSourceMapsCommands
-    // ).concat(
-      symlinkBuildDirCommands
-    ) : []).join('\n');
-
-    var compileCommands =
-      (needsRegenerateCompileAliases ? [compileAliasesCommand] : [])
-      .concat(mightNeedSomething && needsModuleRecompiles ? [compileModulesCommands] : [])
-      .concat(mightNeedSomething && executableArtifact ? [compileExecutableCommand] : [])
-      .concat(shouldCompileExecutableIntoJS ? [buildJSCommands] : []);
-
-    var compileDebuggingSupportCommands =
-      []
-      .concat(mightNeedSomething && executableArtifact ? [compileModuleMapCommand] : [])
-      .concat(mightNeedSomething && executableArtifact ? [compileRebuggerScriptCommand, compileRebuggerVimScriptCommand] : []);
-
-    var compileDebuggingCmdMsg =
-      compileDebuggingSupportCommands.length > 0 ? [boxMsg(buildingDebuggingMsg)].concat(
-        'echo " > Run debugger at: ' + rebuggerArtifact + '"'
-      ).join('\n') : null;
-
-    var compileModulesMsg =
-      sourceFilesToRecompile.length === 0 ?
-        'echo " > No files need recompilation, packing in ' + packageConfig.packageName +
-        (mightNeedSomething ? '. Will link if root package.' : '. Will not link.') + '"' :
-      sourceFilesToRecompile.length < ocamldepOrderedSourceFiles.length ?
-        'echo " > Incrementally recompiling, packing and (if needed) linking ' + packageName +
-        ' modules [ ' + sourceFilesToRecompile.join(' ') + ' ]"' : '';
-
-    var compileCmdMsg =
-      [boxMsg(buildingLibraryMsg), compileModulesMsg]
-      .concat(compileCommands.length === 0 ? [] : [
-        'echo " > Compiler Toolchain:"',
-        // having echo use single quotes doesn't destroy any of the quotes in
-        // findlib commands
-        "echo ' > " + compileCommands.join("\n> ") + "'"
-      ]).join('\n');
-
-    var merlinFile = path.join(packageConfig.realPath, '.merlin');
-    var merlinCommand = [
-      'echo " > Autocomplete .merlin file for ' + merlinFile + ':"',
-      'echo "',
-      generateDotMerlinForPackage(autoGenAliases, justTheModuleArtifacts, rootPackageConfig, packageConfig, buildConfig),
-      '" > ' + merlinFile,
-    ].join('\n');
-
-    var docCommandMsg = [
-      'echo "> Generating documentation:"',
-      'echo " > Generating dedicated build just for docs:"',
-      'echo " > ' + compileNonNamespacedModulesForDocsCommands + '"',
-      'echo " > ' + compileActualDocumentationCommand + '"'
-    ].join('\n');
-
-    var echoDocLocationCommand = 'echo " > Documentation at: file://' + docArtifact + '/index.html"';
-
-    var buildScriptForThisPackage = [];
-    var buildDocScriptForThisPackage = [];
-    buildScriptForThisPackage.push(ensureDirectoriesCommand);
-    // Only regenerate/build the aliases modules if the file set changed.
-    // (recall earlier in this file we ensured that when this happen we perform
-    // a full recompilation of the project to prevent "inconsistent interfaces"
-    // errors).
-    needsRegenerateCompileAliases && buildScriptForThisPackage.push(autoGenAliases.generateCommands);
-    buildScriptForThisPackage.push(compileCmdMsg);
-    buildScriptForThisPackage.push.apply(buildScriptForThisPackage, compileCommands);
-    compileDebuggingCmdMsg !== null && buildScriptForThisPackage.push(compileDebuggingCmdMsg);
-    buildScriptForThisPackage.push.apply(buildScriptForThisPackage, compileDebuggingSupportCommands);
-    buildScriptForThisPackage.push(merlinCommand);
-    buildConfig.doc && buildDocScriptForThisPackage.push(docCommandMsg);
-    buildConfig.doc && buildDocScriptForThisPackage.push(ensureDirectoryCommandForDoc);
-    buildConfig.doc && buildDocScriptForThisPackage.push(ensureDirectoriesCommandForDocIntermediateBuilds);
-    buildConfig.doc && buildDocScriptForThisPackage.push.apply(buildDocScriptForThisPackage, fileCopyCommandsForDoc);
-    buildConfig.doc && buildDocScriptForThisPackage.push(compileNonNamespacedModulesForDocsCommands);
-    buildConfig.doc && buildDocScriptForThisPackage.push(compileActualDocumentationCommand);
-    buildConfig.doc && buildDocScriptForThisPackage.push(echoDocLocationCommand);
-    someDependentProjectNeededRecompilation = mightNeedSomething;
-    ret.push({
-      description: 'Build Script For ' + packageConfig.packageName,
-      scriptLines: buildScriptForThisPackage,
-      onFailShouldContinue: false
-    });
-    buildConfig.doc && ret.push({
-      description: 'Doc Build Script For ' + packageConfig.packageName,
-      scriptLines: buildDocScriptForThisPackage,
-      onFailShouldContinue: true
-    });
-  });
-  return ret;
 };
 
 function directoryExistsSync(absDir) {
@@ -1638,8 +1217,15 @@ function getSubprojectPackageDescriptors(nodeModulesDir) {
     if (fs.statSync(realPath).isDirectory()) {
       var packageJSON = getPackageJSONForPackage(realPath);
       if (packageJSON && packageJSON.CommonML && packageName !== 'CommonML') {
+        var nameField = packageJSON.name;
+        if (!nameField) {
+          throw new Error("Cannot find `name` field in package.json for " +  fullPath);
+        }
+        if (nameField !== packageName) {
+          throw new Error("packageName and directory are different - this is fine. Delete this error. " +  fullPath);
+        }
         ret = ret || {};
-        ret[packageName] = {
+        ret[nameField] = {
           realPath: realPath,
           packageJSON: packageJSON
         };
@@ -1649,49 +1235,56 @@ function getSubprojectPackageDescriptors(nodeModulesDir) {
   return ret;
 }
 
-function getSubprojectPackageConfigTree(absRootDir, currentlyVisitingByRealPath, previouslyTraversedByPackageName) {
+function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir) {
+  var packageJSON = getPackageJSONForPackage(absRootDir);
+  var rootPackageName = packageJSON.name;
+  var foundInvalidPackage = false;
+  currentlyVisitingByPackageName[rootPackageName] = true;
   var subprojectDir = path.join(absRootDir, 'node_modules');
   var subdescriptors = getSubprojectPackageDescriptors(subprojectDir);
-  var subtree = {};
+  var subpackageNames = [];
   for (var subpackageName in subdescriptors) {
     var subdescriptor = subdescriptors[subpackageName];
-    // TODO: previouslyTraversedByPackageName isn't even being used
-    if (!previouslyTraversedByPackageName[subpackageName]) {
-      if (currentlyVisitingByRealPath[subdescriptor.realPath]) {
-        console.log('Circular dependency on ' + subdescriptor.realPath + ' from ' + absRootDir);
-        continue;
+    if (!resourceCache[subpackageName]) {
+      if (currentlyVisitingByPackageName[subpackageName]) {
+        var msg = (
+          'Circular dependency was detected from package ' +
+            rootPackageName + ' (' + absRootDir + ')' +
+            subdescriptor.realPath + ' to ' + absRootDir
+        );
+        logError(msg);
+        throw new Error(msg);
       }
-      currentlyVisitingByRealPath[subdescriptor.realPath] = true;
-      var subpackages = getSubprojectPackageConfigTree(subdescriptor.realPath, currentlyVisitingByRealPath, previouslyTraversedByPackageName);
-      previouslyTraversedByPackageName[subpackageName] = subtree[subpackageName] = {
-        packageName: subpackageName,
-        packageResources: getPackageResourcesForRoot(subdescriptor.realPath),
-        realPath: subdescriptor.realPath,
-        packageJSON: subdescriptor.packageJSON,
-        subpackages: subpackages
-      };
-      currentlyVisitingByRealPath[subdescriptor.realPath] = false;
-    } else {
-      // No need to do it again, this has already been discovered.
-      subtree[subpackageName] = previouslyTraversedByPackageName[subpackageName];
+      foundInvalidPackage =
+        foundInvalidPackage ||
+        recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, subdescriptor.realPath);
     }
+    subpackageNames.push(subpackageName);
   }
-  return subtree;
-}
-
-function getProjectPackageConfigTree(absRootDir) {
-  var currentlyVisitingByRealPath = {};
-  var previouslyTraversedByPackageName = {};
-  currentlyVisitingByRealPath[absRootDir] = true;
-  var subpackages = getSubprojectPackageConfigTree(absRootDir, currentlyVisitingByRealPath, previouslyTraversedByPackageName);
-  return {
-    packageName: path.basename(absRootDir),
+  resourceCache[rootPackageName] = {
+    packageName: rootPackageName,
     packageResources: getPackageResourcesForRoot(absRootDir),
     realPath: absRootDir,
-    packageJSON: getPackageJSONForPackage(absRootDir),
-    subpackages: subpackages
+    packageJSON: packageJSON,
+    subpackageNames: subpackageNames
   };
+  var thisPackageInvalid = verifyPackageConfig(resourceCache[rootPackageName], resourceCache);
+  foundInvalidPackage = foundInvalidPackage || thisPackageInvalid;
+  currentlyVisitingByPackageName[subpackageName] = false;
+  return foundInvalidPackage;
 }
+
+/**
+ * Returns the top level package name.
+ */
+function recordPackageResourceCacheAndValidate(resourceCache, absRootDir) {
+  var currentlyVisitingByPackageName = {};
+  var foundInvalidPackage =
+    recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir);
+  var packageJSON = getPackageJSONForPackage(absRootDir);
+  return {foundInvalidPackage: foundInvalidPackage, rootPackageName: packageJSON.name};
+};
+
 
 var executeScripts = function(scripts, outputSoFar, onFailTerminate, onDone, filterOutput) {
   if (scripts.length === 0) {
@@ -1734,57 +1327,643 @@ var executeScripts = function(scripts, outputSoFar, onFailTerminate, onDone, fil
   }
 };
 
-var _walkSubprojects = function(resultsSoFar, roots, onEach, onDone) {
-  if (roots.length === 0) {
-    onDone(resultsSoFar);
-  } else {
-    _walkProjectTree(resultsSoFar, roots[0], onEach, function(doneRootProject, recurseResults) {
-      _walkSubprojects(recurseResults, roots.slice(1), onEach, onDone);
-    });
-  }
+var NodeErrorState = {
+  Success: 'Success',
+  SubnodeFail: 'SubnodeFail',
+  NodeFail: 'NodeFail'
 };
 
-var _walkProjectTree = function(resultsSoFar, root, onEach, onWalkComplete) {
-  var packageNames = Object.keys(root.subpackages);
-  var subpackages = packageNames.map(function(name) {return root.subpackages[name];});
-  _walkSubprojects(resultsSoFar, subpackages, onEach, function(recurseResults){
-    onEach(root, function(rootDoneResult) {
-      var doneRootProject = root;
-      onWalkComplete(doneRootProject, recurseResults.concat([rootDoneResult]));
-    });
+var cacheVersionedResultAndNotifyWaiters = function(resultsCache, packageName, versionedResult, waiters) {
+  resultsCache.alreadyBeingBuiltWithWaiters[packageName] = null;
+  resultsCache.versionedResultsByPackageName[packageName] = versionedResult;
+  waiters.forEach(function(waiter) {
+    waiter(null);
   });
 };
 
-/**
- * Walks project tree, invoking `onEach` for each project, in topological sort
- * order. Returns the topologically ordered list of "return" values from
- * `onEach`'s `onOneDone` invocation.
- */
-var walkProjectTree = _walkProjectTree.bind(null, []);
-
-var computeResourceCache = function(buildConfig, walkResults) {
-  var byPath = {};
-  var _getResourceCacheNodeByPackagePath = function(result) {
-    // Transform depth into links (to avoid redundant subtrees)
-    var shallowNode = {
-      shallowPackageConfig: {},
-      ocamldepOutput: result.ocamldepOutput
+var discoverDeps = function(resourceCache, packageName, onDone) {
+  var packageResource = resourceCache[packageName];
+  var packageResources = packageResource.packageResources;
+  var findlibOCamldepCommand = getFindlibCommand(resourceCache[packageName], programForCompiler(OCAMLDEP), false);
+  log('> Computing dependencies for ' + packageResource.packageName + '\n\n');
+  var preprocessor = packageResource.packageJSON.CommonML.preprocessor;
+  var cmd =
+    [findlibOCamldepCommand]
+    .concat(getOCamldepFlags(packageResource))
+    .join(' ');
+  log(cmd);
+  var scripts = [{
+    description: 'ocamldep script',
+    scriptLines: [cmd],
+    onFailShouldContinue: false
+  }];
+  var onOcamldepFail = function(e) {
+    var dependencyResults = {
+      commands: [cmd],
+      successfulResults: null,
+      err: e
     };
-    for (var prop in result.packageConfig) {
-      if (prop !== 'subpackages') {
-        shallowNode.shallowPackageConfig[prop] = result.packageConfig[prop];
-      }
-    }
-    var subpackageAbsolutePaths = [];
-    for (var subpackageName in result.packageConfig.subpackages) {
-      var subpackage = result.packageConfig.subpackages[subpackageName];
-      subpackageAbsolutePaths.push(subpackage.realPath);
-    }
-    shallowNode.subpackageAbsolutePaths = subpackageAbsolutePaths;
-    byPath[result.packageConfig.realPath] = shallowNode;
+    onDone(dependencyResults);
   };
-  walkResults.forEach(_getResourceCacheNodeByPackagePath);
-  return {byPath: byPath, buildConfig: buildConfig};
+  var onOneOcamldepDone = function(oneOcamldepOutput) {
+    var dependencyResults = {
+      commands: [cmd],
+      successfulResults: removeBreaks(oneOcamldepOutput).split(' ').filter(notEmptyString),
+      err: null
+    };
+    onDone(dependencyResults);
+  };
+  executeScripts(scripts, '', onOcamldepFail, onOneOcamldepDone);
+};
+
+var getEchoJsCommand = function(jsArtifact, dirToContainJsBuildDirSymlink) {
+  return 'echo "' + [
+    '#',
+    '# JavaScript Package at: ' + jsArtifact,
+    '# ======================================',
+    '#',
+    '# Running in a browser',
+    '# --------------------',
+    '# - Create an index html page (that includes script ./jsBuild/app.js) at :',
+    '#',
+    '#    file:\/\/' + dirToContainJsBuildDirSymlink + '/index.html ',
+    '#',
+    '# - Then you can serve it using python via:',
+    '#',
+    '#    pushd ' + dirToContainJsBuildDirSymlink + ' && python -m SimpleHTTPServer || popd',
+    '#',
+    '# - And open it by clicking on:',
+    '#',
+    '#    http:\/\/localhost:8000\/index.html ',
+    '#',
+    '# - Open in Chrome, open the dev tools, *then* refresh to see source maps.',
+    '#',
+    '# Test in JavaScriptCore',
+    '# -----------------------',
+    '#  /System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Resources/jsc -e \\"console = {log:print};\\" -f ' + jsArtifact,
+    '#'
+  ].join('\n') + '"';
+};
+
+// We could pass all of `ocamldepOrderedSourceFiles`, but that creates
+// build artifacts. So we can supply all of the already built artifacts
+// (in the _build) folder, but that won't accept .cmi's so we must only
+// get the .cmos.
+var getJustTheModuleArtifactsForAllPackages = function(rootPackageName, buildPackagesResultsCache, resourceCache) {
+  var justTheModuleArtifacts = [];
+  traversePackagesInOrder(resourceCache, rootPackageName, function(packageName) {
+    var autogenAliases = buildPackagesResultsCache.versionedResultsByPackageName[packageName].results.computedData.autogenAliases;
+    var packageResource = resourceCache[packageName];
+    justTheModuleArtifacts.push(buildArtifact(autogenAliases.genSourceFiles.internalImplementation, buildConfig, packageResource));
+    justTheModuleArtifacts.push.apply(
+      justTheModuleArtifacts,
+      getModuleArtifacts(
+        buildPackagesResultsCache.versionedResultsByPackageName[packageName].results.dependencyResults.successfulResults,
+        resourceCache[packageName],
+        resourceCache[rootPackageName],
+        buildConfig
+      )
+    );
+  });
+  return justTheModuleArtifacts;
+};
+
+var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resourceCache, onDone) {
+  var packageResource = resourceCache[rootPackageName];
+  var executableArtifact = buildForExecutable(packageResource, packageResource, buildConfig);
+  var findlibLinkCommand = getFindlibCommand(packageResource, programForCompiler(buildConfig.compiler), true);
+  var justTheModuleArtifactsForAllPackages =
+    getJustTheModuleArtifactsForAllPackages(rootPackageName, buildPackagesResultsCache, resourceCache);
+
+
+  var commonML = packageResource.packageJSON.CommonML;
+  var linkFlags = commonML.linkFlags || [];
+  var compileFlags = commonML.compileFlags || []; // TODO: Rename 'rootCompileFlags'
+  var tags = commonML.tags;
+
+  var compileExecutableCommand =
+    [findlibLinkCommand]
+    .concat(['-o', executableArtifact])
+    .concat(buildConfig.forDebug ? ['-g'] : [])
+    .concat(linkFlags)
+    .concat(justTheModuleArtifactsForAllPackages)
+    .join(' ');
+
+  // Can only build the top level packages into JS - ideally we'd also be
+  // able to dynamically link JS bundles..
+  var shouldCompileExecutableIntoJS = !!buildConfig.jsCompile;
+  var placeJsBuildDirInField = packageResource.packageJSON.CommonML.jsPlaceBuildArtifactsIn;
+  var dirToContainJsBuildDirSymlink = placeJsBuildDirInField ? path.join(packageResource.realPath, placeJsBuildDirInField) : packageResource.realPath;
+  var jsBuildDir = entireActualBuildDir(packageResource, buildConfig) + '_js';
+  var byteCodeBuildDir = entireActualBuildDir(packageResource, buildConfig);
+  var ensureJsBuildDirCommand = ['mkdir', '-p', jsBuildDir].join(' ');
+  var jsArtifactRelativeForm = './app.js';
+  var jsArtifact = shouldCompileExecutableIntoJS ? path.join(jsBuildDir, 'app.js') : null;
+
+  var symlinkBuildDirCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
+    path.join(dirToContainJsBuildDirSymlink, 'jsBuild'),
+    jsBuildDir
+  );
+
+  // The cp command is such a broken API - there isn't a way to overwrite
+  // an entire directory.
+  // Change into the root directory so that source maps are w.r.t. correct location.
+  var changeDir = shouldCompileExecutableIntoJS && ['cd', jsBuildDir ].join(' ');
+  var buildJSArtifactCommand = shouldCompileExecutableIntoJS && [
+    'js_of_ocaml',
+    '--source-map',
+    '--debug-info',
+    '--pretty',
+    '--linkall',
+    '--noinline',
+    executableArtifact,
+    '-o',
+    jsArtifactRelativeForm
+  ].join(' ');
+  var echoJSMessage = getEchoJsCommand(jsArtifact, dirToContainJsBuildDirSymlink);
+  var buildJSCommands = (shouldCompileExecutableIntoJS ? [
+    ensureJsBuildDirCommand,
+    changeDir,
+    buildJSArtifactCommand,
+    echoJSMessage
+  ].concat(symlinkBuildDirCommands) : []).join('\n');
+
+  var compileCommands = [compileExecutableCommand].concat(shouldCompileExecutableIntoJS ? [buildJSCommands] : []);
+
+  var buildingExecMsg = "Compiling executable " + rootPackageName;
+  var compileCmdMsg =
+    [boxMsg(buildingExecMsg)]
+    .concat(compileCommands.length === 0 ? [] : [
+      'echo " > Compiler Toolchain:"',
+      // having echo use single quotes doesn't destroy any of the quotes in
+      // findlib commands
+      "echo ' > " + compileCommands.join("\n> ") + "'"
+    ]).join('\n');
+
+  var buildScripts = [{
+    description: 'Build Script For ' + packageResource.packageName,
+    scriptLines: [compileCmdMsg].concat(compileCommands),
+    onFailShouldContinue: false
+  }];
+  var onBuildFail = function(err) {
+    var buildResults = {commands: [compileCmdMsg], successfulResults: null, err: err };
+    var computedData = {executableArtifact: executableArtifact};
+    onDone(buildResults, computedData);
+  };
+  var onBuildComplete = function(buildOutput) {
+    var buildResults = {commands: [compileCmdMsg], successfulResults: buildOutput, err: null};
+    var computedData = {
+      executableArtifact: executableArtifact,
+      jsExecutableArtifact: shouldCompileExecutableIntoJS && jsArtifact
+    };
+    onDone(buildResults, computedData);
+  };
+  executeScripts(buildScripts, '', onBuildFail, onBuildComplete);
+};
+
+var getSomeDependencyTriggeredRebuild = function(subpackageNames, resultsCache) {
+  var someDependencyTriggeredRebuild = false;
+  subpackageNames.forEach(function(subpackageName) {
+    if (resultsCache.versionedResultsByPackageName[subpackageName].lastBuildIdEffectingDependents === resultsCache.currentBuildId) {
+      someDependencyTriggeredRebuild = true;
+    }
+  });
+  return someDependencyTriggeredRebuild;
+};
+
+/**
+ * TODO: Minimal *inter* pacakge rebuilds: "Pure Interfaced" packages. If every
+ * *publicly* marked module has an interface file, then in many cases, it can
+ * be determined that package impl recompilations will not effect package
+ * dependencies. (To do this right, we must have a *graph* of intra-module
+ * dependencies). If triggering an internal rebuild does not require rebuilding
+ * *any* public module's interface (which won't always be the case when
+ * signatures "include" other modules). Could every interface be inferred and
+ * therefore save compilation times for deeply depended on packages? (Kind of
+ * like PureRenderMixin - it costs more per node to evaluate, but could pay off
+ * by avoiding propagation to other modules.
+ *
+ * TODO: Minimal *intra* package rebuilds. The only practical way to achieve
+ * minimal intra-package rebuilds, is to get the `ocamldep` graph output. It's
+ * not as simple as finding changed mtimes of interfaces (explicit or
+ * implicit). An interface myInterface.mli can `include OtherModule_Intf.S`, so
+ * the myInterface.mli did not actually change. So the only way is to track
+ * individual file dependencies within any single project. For better
+ * dependency tracking, we can use compiler-libs to cache the type of interfact
+ * files.
+ *
+ * TODO: Avoid the following when we're only rebuilding because a *downstream*
+ * file changed:
+ *
+ * - Dependency analysis.
+ * - Generating Alias files.
+ * - Maybe even recompiling those alias files.
+ * - Computing and generating .merlin files.
+ *
+ */
+var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, packageName, onDirtyDetectingBuilderDone) {
+  var packageResource = resourceCache[packageName];
+  var rootPackageResource = resourceCache[rootPackageName];
+  var lastSuccessfulPackageResource =
+    prevResultsCache.versionedResultsByPackageName[packageName] ?
+    prevResultsCache.versionedResultsByPackageName[packageName].lastSuccessfulPackageResource : null;
+  var neverBeenSuccessfullyBuilt = !lastSuccessfulPackageResource;
+  var subpackageNames = packageResource.subpackageNames;
+
+  var someDependencyTriggeredRebuild = getSomeDependencyTriggeredRebuild(subpackageNames, resultsCache);
+  // Can remove these since the builder itself will redo this logic and then
+  // some to determine which *parts* of the build need to be performed.
+  var mTimesChanged = getMTimesChanged(resourceCache[packageName], lastSuccessfulPackageResource, packageName);
+  var fileSetChanged = getFileSetChanged(resourceCache[packageName], lastSuccessfulPackageResource, packageName);
+  var buildConfigMightChangeCompilation = getBuildConfigMightChangeCompilation(resultsCache.buildConfig, prevResultsCache.buildConfig);
+  var commonMLChanged = getCommonMLChanged(resourceCache[packageName], lastSuccessfulPackageResource, packageName);
+  var configurationChanged = buildConfigMightChangeCompilation || commonMLChanged;
+  var somethingInThisProjectChanged =
+    mTimesChanged || fileSetChanged ||
+    configurationChanged;
+  var needsReevaluateDeps =
+    somethingInThisProjectChanged ||
+    // Either don't have dependency results.
+    !prevResultsCache.versionedResultsByPackageName[packageName].results.dependencyResults ||
+    // Or they were empty
+    !prevResultsCache.versionedResultsByPackageName[packageName].results.dependencyResults.successfulResults;
+
+  var buildFromDependencies = function(dependencyResults) {
+    var dependencySuccessfulResults = dependencyResults.successfulResults;
+    var commonML = packageResource.packageJSON.CommonML;
+    validateFlags(commonML.compileFlags, commonML.linkFlags, packageName);
+    // If any new file was added, we have to regenerate the autogenerated aliases
+    // files and recompile them. This means we have to recompile *everything* in
+    // the project. We cannot just recompile the aliases files, and the newly
+    // added/changed modules because when it comes time to link them all
+    // together, the older compilations will have "inconsistent interface"s
+    // w.r.t. to autogenerated aliases.  We also make sure to *not*
+    // recompile/generate the aliases when no new module has been added.
+    var needsRecompileAllModules = configurationChanged || fileSetChanged;
+
+    // Same condition as above
+    var needsRegenerateCompileAliases = configurationChanged || fileSetChanged;
+    var needsRegenerateDotMerlin = configurationChanged || fileSetChanged;
+    var sourceFilesToRecompile =
+      needsRecompileAllModules ? dependencySuccessfulResults :
+      getFilesNeedingRecompilation(dependencySuccessfulResults, prevResultsCache, resourceCache, prevResourceCache, packageName);
+    var needsModuleRecompiles = sourceFilesToRecompile.length > 0;
+    var fileOutputDirs = getSanitizedBuildDirs(packageResource, rootPackageResource, buildConfig);
+
+    // Compiling alias files for public/internal consumption of this module.
+    var autogenAliases = autogenAliasesCommand(
+      dependencySuccessfulResults,
+      packageResource,
+      rootPackageResource,
+      buildConfig
+    );
+    var singleFileCompileFlags = getSingleFileCompileFlags(packageResource, buildConfig, true);
+
+    var searchPaths = makeSearchPathStrings(
+      fileOutputDirs
+      .concat(sanitizedImmediateDependenciesPublicPaths(resourceCache, packageResource, rootPackageResource, buildConfig))
+    );
+
+    var compileCommand =
+      getFindlibCommand(packageResource, programForCompiler(buildConfig.compiler), false);
+
+    var singleFileCompile =
+      [compileCommand]
+      .concat(singleFileCompileFlags)
+      .concat(searchPaths)
+      .concat(['-open', autogenAliases.internalModuleName]).join(' ') + ' ';
+
+    // The performance of this will be horrible if using ocamlfind with custom
+    // packages - it takes a long time to look those up, and we do it for every
+    // file! In the future, cache the result of the findlib command.
+    var compileModuleOutputs =
+      getNamespacedFileOutputCommands(sourceFilesToRecompile, packageResource, rootPackageResource, buildConfig);
+    var compileModulesCommands =
+      singleFileCompile + compileModuleOutputs.map( function(c){return c.compileOutputString;}).join(' ');
+
+    // Always repack regardless of what changed it's pretty cheap.
+    var compileAliasesCommand =
+      [compileCommand]
+      .concat(singleFileCompileFlags)
+      // -bin-annot generates .cmt files for the pack which merlin needs to
+      // work correctly.
+      // Need to add -49 so that it doesn't complain because we haven't
+      // actually compiled the namespaced modules yet. They are like forward
+      // declarations in that sense.
+      .concat(['-no-alias-deps -w -49'])
+      .concat(searchPaths)
+      .concat([
+        autogenAliases.genSourceFiles.internalInterface,
+        autogenAliases.genSourceFiles.internalImplementation,
+      ])
+      .join(' ');
+
+    var ensureDirectoriesCommand = ['mkdir', '-p', ].concat(fileOutputDirs).join(' ');
+    var justTheModuleArtifacts =
+      getModuleArtifacts(dependencySuccessfulResults, packageResource, rootPackageResource, buildConfig);
+    var compileCommands =
+      (needsRegenerateCompileAliases ? [compileAliasesCommand] : [])
+      .concat(someDependencyTriggeredRebuild || needsModuleRecompiles ? [compileModulesCommands] : []);
+
+    var compileModulesMsg =
+      sourceFilesToRecompile.length === 0 ?
+        'echo " > No files need recompilation, packing in ' + packageResource.packageName +
+        (somethingInThisProjectChanged ? '. Will link if root package.' : '. Will not link.') + '"' :
+      sourceFilesToRecompile.length < dependencySuccessfulResults.length ?
+        'echo " > Incrementally recompiling, packing and (if needed) linking ' + packageName +
+        ' modules [ ' + sourceFilesToRecompile.join(' ') + ' ]"' : '';
+
+    // Already built this dependency
+    var buildingLibraryMsg = 'Building library ' + packageName;
+    var compileCmdMsg =
+      [boxMsg(buildingLibraryMsg), compileModulesMsg]
+      .concat(compileCommands.length === 0 ? [] : [
+        'echo " > Compiler Toolchain:"',
+        // having echo use single quotes doesn't destroy any of the quotes in
+        // findlib commands
+        "echo ' > " + compileCommands.join("\n> ") + "'"
+      ]).join('\n');
+
+    if (needsRegenerateDotMerlin) {
+      var merlinPath = path.join(packageResource.realPath, '.merlin');
+      var merlinCommand = [
+        'echo " > Autocomplete .merlin file for ' + merlinPath + ':"',
+        'echo "',
+        generateDotMerlinForPackage(resourceCache, autogenAliases, justTheModuleArtifacts, rootPackageName, packageName),
+        '" > ' + merlinPath,
+      ].join('\n');
+    }
+
+    var buildScriptForThisPackage = [];
+    buildScriptForThisPackage.push(ensureDirectoriesCommand);
+    // Only regenerate/build the aliases modules if the file set changed.
+    // (recall earlier in this file we ensured that when this happen we perform
+    // a full recompilation of the project to prevent "inconsistent interfaces"
+    // errors).
+    needsRegenerateCompileAliases && buildScriptForThisPackage.push(autogenAliases.generateCommands);
+    // Build merlin before so that even if the package build fails, at least
+    // the prior packages' builds will benefit editing the currently failing
+    // package.
+    needsRegenerateDotMerlin && buildScriptForThisPackage.push(merlinCommand);
+    buildScriptForThisPackage.push(compileCmdMsg);
+    buildScriptForThisPackage.push.apply(buildScriptForThisPackage, compileCommands);
+    var buildScripts = [{
+      description: 'Build Script For ' + packageResource.packageName,
+      scriptLines: buildScriptForThisPackage,
+      onFailShouldContinue: false
+    }];
+    var onBuildFail = function(err) {
+      var buildResults = {commands: buildScriptForThisPackage, successfulResults: null, err: err };
+      var computedData = {};
+      onDirtyDetectingBuilderDone(dependencyResults, buildResults, computedData, true, true);
+    };
+    var onBuildComplete = function(buildOutput) {
+      var buildResults = {commands: buildScriptForThisPackage, successfulResults: buildOutput, err: null};
+      var computedData = {autogenAliases: autogenAliases};
+      onDirtyDetectingBuilderDone(dependencyResults, buildResults, computedData, true, true);
+    };
+    executeScripts(buildScripts, '', onBuildFail, onBuildComplete);
+  };
+
+  /**
+   * Now that that huge function is defined, do the real magic.
+   */
+  if (needsReevaluateDeps) {
+    var onDepsDiscoveryDone = function(dependencyResults) {
+      if (dependencyResults.err) {
+        onDirtyDetectingBuilderDone(dependencyResults, {commands: null, successfulResults: null, err: null}, {}, true, true);
+      } else {
+        buildFromDependencies(dependencyResults);
+      }
+    };
+    discoverDeps(resourceCache, packageName, onDepsDiscoveryDone);
+  } else if (someDependencyTriggeredRebuild) {
+    // Can skip internal dependency evaluation if we are *only* building
+    // because a dependency was rebuilt (yet we have no internal file changes).
+    // TODO: Can also skip merlin generation and alias generation!
+    var previousDependencyResults = prevResultsCache.versionedResultsByPackageName[packageName].results.dependencyResults;
+    buildFromDependencies(previousDependencyResults);
+  } else {
+    var prevResults = prevResultsCache.versionedResultsByPackageName[packageName].results;
+    onDirtyDetectingBuilderDone(prevResults.dependencyResults, prevResults.buildResults, prevResults.computedData, false, false);
+  }
+};
+
+
+/**
+ * Incremental building is merely just priming the results cache.  A
+ * preprocessing step determines which results couldnt possibly be effected by
+ * mtime changes.
+ *
+ * `resultsCache` has shape: {
+ *     currentBuildId: number,
+ *     buildConfig: (build config for currentBuildId),
+ *     alreadyBeingBuiltWithWaiters: [err => ],
+ *     versionedResultsByPackageName: {
+ *
+ *       // buildId that the package was last *checked* and either successfully
+ *       // cleaned or failed. After each build, every package gets the
+ *       // `currentBuildId` whether or not it succeeds cleaning.
+ *       lastAttemptedBuildId: number,
+ *
+ *       // buildId that the package was last deemed sufficiently "cleaned".
+ *       // Every successfully built package gets the `lastSuccessfulBuildId` = `currentBuildId`.
+ *       lastSuccessfulBuildId: number,
+ *       lastSuccessfulPackageResource: packageResource,  (last project file set that succeeded)
+ *
+ *       // Last buildId that successfully produced artifacts - that effects
+ *       // the whole project (linking etc). Always older or equal to `lastSuccessfulBuildId`.
+ *       lastBuildIdEffectingProject: number,
+ *
+ *       Last buildId that will effect dependents compilation. Usually
+ *       paired with lastBuildIdEffectingProject.
+ *       lastBuildIdEffectingDependents: number,
+ *       results: {
+ *         errorState: Success | SubnodeFail | NodeFail,
+ *         erroredSubpackages: [string],
+ *
+ *         TODO: Just make these an opaque array with
+ *         commands/successfulResults/err, that can be "replayed". For anything
+ *         that needs to be structured/modeled, use `computedData`.
+ *         Question: But then how do seconds stages know that they can reuse
+ *         the "zeroth position" in the previous results cache? I suppose that
+ *         can go in `computedData`.
+ *         dependencyResults: {
+ *           commands: [string],
+ *           successfulResults: string || null,
+ *           err: * || null
+ *         },
+ *         buildResults: {
+ *           commands: [string],
+ *           successfulResults: string || null,
+ *           err: * || null,
+ *         },
+ *         computedData: *,
+ *
+ *       }
+ *     }
+ *  }
+ *
+ *  Nothing changed, and package marked up to date, nothing changed about what
+ *  needs to be relinked on account of *this* package.
+ *
+ *      lastAttemptedBuildId: 1
+ *      lastSuccessfulBuildId: 1,
+ *      lastBuildIdEffectingProject: 0
+ *      lastBuildIdEffectingDependents: 0
+ *      lastSuccessfulBuildId: 1
+ *
+ *  Package rebuilt, dependencies needn't be rebuilt, whole project must be rebuilt (linked).
+ *
+ *      lastAttemptedBuildId: 1
+ *      lastSuccessfulBuildId: 1,
+ *      lastBuildIdEffectingProject: 1
+ *      lastBuildIdEffectingDependents: 0
+ *      lastSuccessfulBuildId: 1
+ *
+ *  Package rebuilt and dependencies need to be rebuilt, but whole program
+ *  neendn't be linked (this is likely not a valid configuration).
+ *
+ *      lastAttemptedBuildId: 1
+ *      lastSuccessfulBuildId: 1,
+ *      lastBuildIdEffectingProject: 0
+ *      lastBuildIdEffectingDependents: 1
+ *      lastSuccessfulBuildId: 1
+ *
+ *  This is the most common form when a project recompiles new versions of artifacts.
+ *
+ *      lastAttemptedBuildId: 1
+ *      lastSuccessfulBuildId: 1,
+ *      lastBuildIdEffectingProject: 1
+ *      lastBuildIdEffectingDependents: 1
+ *      lastSuccessfulBuildId: 1
+ *
+ *  Tried to compile the project, but was not successful.
+ *
+ *      lastAttemptedBuildId: 2
+ *      lastSuccessfulBuildId: 1,
+ *      lastBuildIdEffectingProject: anything
+ *      lastBuildIdEffectingDependents: anything
+ *      lastSuccessfulBuildId: anything
+ *
+ *
+ * `dirtyDetectingBuilder(rootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, packageName, function(dependencyResults, buildResults, computedData, effectWholeProject, effectDependents) {})`
+ * `mapper(root, subpackagesResults, function(err, mapperResult) {})`
+ */
+var walkProjectTree = function(rootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, dirtyDetectingBuilder, packageName, onRootDone) {
+  // If it's either WIP by another node, or done.
+  var currentBuildId = resultsCache.currentBuildId;
+  var alreadyBeingBuilt = resultsCache.alreadyBeingBuiltWithWaiters[packageName];
+  if (alreadyBeingBuilt) {
+    resultsCache.alreadyBeingBuiltWithWaiters[packageName].push(onRootDone);
+  } else {
+    var mostRecent =
+      // It could have already been built by this build process.
+      resultsCache.versionedResultsByPackageName[packageName] ||
+      // Or a prior build process, if not by this build process (short circuit is important here).
+      prevResultsCache.versionedResultsByPackageName[packageName];
+
+    // The most recent attempt to build occured in *this* build. Nothing more
+    // to do. If it succeeded, great - the cache is updated. If not, trying
+    // again won't help!
+    if (mostRecent && currentBuildId === mostRecent.lastAttemptedBuildId) {
+      onRootDone(null);
+    } else {
+      resultsCache.alreadyBeingBuiltWithWaiters[packageName] = [];
+      if (!mostRecent) {
+        mostRecent = {
+          lastAttemptedBuildId: -1,
+          lastSuccessfulBuildId: -1,
+          lastSuccessfulPackageResource: null,
+          lastBuildIdEffectingProject: -1,
+          lastBuildIdEffectingDependents: -1,
+          results: null
+        };
+        resultsCache.versionedResultsByPackageName[packageName] = mostRecent;
+      }
+      var preBuild = resultsCache.versionedResultsByPackageName[packageName];
+      // Abstracts away *everything* about the form of the resource cache and
+      // Build steps!
+      var subpackageNames = resourceCache[packageName].subpackageNames;
+      var forEachSubpackage = function(subpackageName, onSubpackageDone) {
+        walkProjectTree(rootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, dirtyDetectingBuilder, subpackageName, onSubpackageDone);
+      };
+      var onAllSubpackagesDone = function(err) {
+        var waiters = resultsCache.alreadyBeingBuiltWithWaiters[packageName];
+        // Shouldn't happen. Errors should be encoded in results.
+        if (err) {
+          throw new Error(err);
+        }
+        var errorDependencies = [];
+        subpackageNames.forEach(function(depName) {
+          var curDependencyResult = resultsCache.versionedResultsByPackageName[depName].results;
+          if (curDependencyResult.errorState === NodeErrorState.SubnodeFail ||
+              curDependencyResult.errorState === NodeErrorState.NodeFail) {
+            errorDependencies.push(depName);
+          }
+        });
+        if (errorDependencies.length) {
+          var results = {
+            errorState: NodeErrorState.SubnodeFail,
+            erroredSubpackages: errorDependencies,
+            dependencyResults: {commands: null, successfulResults: null, err: null},
+            buildResults: {commands: null, successfulResults: null, err: null},
+            computedData: null
+          };
+          cacheVersionedResultAndNotifyWaiters(
+            resultsCache,
+            packageName,
+            {
+              lastAttemptedBuildId: currentBuildId,
+              lastSuccessfulBuildId: mostRecent.lastSuccessfulBuildId,
+              lastSuccessfulPackageResource: mostRecent.lastSuccessfulPackageResource,
+              lastBuildIdEffectingProject: mostRecent.lastBuildIdEffectingProject,
+              lastBuildIdEffectingDependents: mostRecent.lastBuildIdEffectingDependents,
+              results: results
+            },
+            waiters
+          );
+          onRootDone(null);
+        } else {
+          // dirtyDetectingBuilder can return the previous build result (not
+          // versioned), and this will simply reversion it to the current id.
+          var onBuildDone = function(dependencyResults, buildResults, computedData, effectWholeProject, effectDependents) {
+            var errorState = buildResults.err || dependencyResults.err ? NodeErrorState.NodeFail : NodeErrorState.Success;
+            var results = {
+              errorState: errorState,
+              erroredSubpackages: [],
+              dependencyResults: dependencyResults,
+              buildResults: buildResults,
+              computedData: computedData
+            };
+            cacheVersionedResultAndNotifyWaiters(
+              resultsCache,
+              packageName,
+              errorState !== NodeErrorState.Success ? {
+                lastAttemptedBuildId: currentBuildId,
+                lastSuccessfulBuildId: mostRecent.lastSuccessfulBuildId,
+                lastSuccessfulPackageResource: mostRecent.lastSuccessfulPackageResource,
+                lastBuildIdEffectingProject: mostRecent.lastBuildIdEffectingProject,
+                lastBuildIdEffectingDependents: mostRecent.lastBuildIdEffectingDependents,
+                results: results
+              } : {
+                lastAttemptedBuildId: currentBuildId,
+                lastSuccessfulBuildId: currentBuildId,
+                lastSuccessfulPackageResource: resourceCache[packageName],
+                lastBuildIdEffectingProject: effectWholeProject ? currentBuildId : mostRecent.lastBuildIdEffectingProject,
+                lastBuildIdEffectingDependents: effectDependents ? currentBuildId : mostRecent.lastBuildIdEffectingDependents,
+                results: results
+              },
+              waiters
+            );
+            onRootDone(null);
+          };
+          dirtyDetectingBuilder(rootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, packageName, onBuildDone);
+        }
+      };
+      async.eachLimit(subpackageNames, buildConfig.concurrency, forEachSubpackage, onAllSubpackagesDone);
+    }
+  }
 };
 
 /**
@@ -1792,129 +1971,249 @@ var computeResourceCache = function(buildConfig, walkResults) {
  * though recompilation might be needed if other things change (like
  * buildConfig or package.json).
  */
-var getMTimesChanged = function(resourceCache, packageConfig) {
-  var cachedResource = resourceCache.byPath[packageConfig.realPath];
-  return !cachedResource ||
+var getMTimesChanged = function(packageResource, lastSuccessfulPackageResource) {
+  return !lastSuccessfulPackageResource ||
     arraysDiffer(
-      cachedResource.shallowPackageConfig.packageResources.sourceFileMTimes,
-      packageConfig.packageResources.sourceFileMTimes
+      lastSuccessfulPackageResource.packageResources.sourceFileMTimes,
+      packageResource.packageResources.sourceFileMTimes
     )
 };
-var getFileSetChanged = function(resourceCache, packageConfig) {
-  var cachedResource = resourceCache.byPath[packageConfig.realPath];
-  return !cachedResource ||
+var getFileSetChanged = function(packageResource, lastSuccessfulPackageResource) {
+  return !lastSuccessfulPackageResource ||
     arraysDiffer(
-      cachedResource.shallowPackageConfig.packageResources.sourceFiles,
-      packageConfig.packageResources.sourceFiles
+      packageResource.packageResources.sourceFiles,
+      lastSuccessfulPackageResource.packageResources.sourceFiles
     );
 };
-
-var getCommonMLChanged = function(resourceCache, packageConfig) {
-  var cachedResource = resourceCache.byPath[packageConfig.realPath];
-  return !cachedResource || (
-    JSON.stringify(cachedResource.shallowPackageConfig.packageJSON.CommonML) !==
-    JSON.stringify(packageConfig.packageJSON.CommonML)
+var getCommonMLChanged = function(packageResource, lastSuccessfulPackageResource) {
+  return !lastSuccessfulPackageResource || (
+    JSON.stringify(packageResource.packageJSON.CommonML) !==
+    JSON.stringify(lastSuccessfulPackageResource.packageJSON.CommonML)
   );
 };
 
 /**
  * Might change (native) compilation to be more exact.
  */
-var getBuildConfigMightChangeCompilation = function(resourceCache, buildConfig) {
-  return !resourceCache.buildConfig ||
-    resourceCache.buildConfig.compiler !== buildConfig.compiler ||
-    resourceCache.buildConfig.forDebug !== buildConfig.forDebug;
+
+var getBuildConfigMightChangeCompilation = function(buildConfig, prevBuildConfig) {
+  return !prevBuildConfig ||
+    prevBuildConfig.yacc !== buildConfig.yacc ||
+    prevBuildConfig.compiler !== buildConfig.compiler ||
+    prevBuildConfig.forDebug !== buildConfig.forDebug;
 };
 
-function buildTree(tree) {
+
+function buildTree() {
   var resourceCachePath =
-    path.join(tree.realPath, actualBuildDir(buildConfig), '_resourceCache.json');
-  var pattern = cliConfig.hidePath ? cliConfig.hidePath.replace(/\//g, '\\\/')  : null;
-  var filterRE = new RegExp(pattern, "g");
-  var filterOutput = cliConfig.hidePath ? function(str) {
-    return str.replace(filterRE, '');
-  } : null;
-  var previousResourceCache =
-    fs.existsSync(resourceCachePath) ?
-    JSON.parse(fs.readFileSync(resourceCachePath)) :
-    {byPath: {}};
+    path.join(CWD, actualBuildDir(buildConfig), '__resourceCache.json');
+  var lexResultsCachePath =
+    path.join(CWD, actualBuildDir(buildConfig), '__lexResultsCache.json');
+  var buildPackagesResultsCachePath =
+    path.join(CWD, actualBuildDir(buildConfig), '__buildPackagesResultsCache.json');
+  var buildExecutableResultsCachePath =
+    path.join(CWD, actualBuildDir(buildConfig), '__buildExecutableResultsCache.json');
+  var prevResourceCache = fs.existsSync(resourceCachePath) ?  JSON.parse(fs.readFileSync(resourceCachePath)) : {};
+  var prevBuildPackagesResultsCache =
+    fs.existsSync(buildPackagesResultsCachePath) ?
+    JSON.parse(fs.readFileSync(buildPackagesResultsCachePath)) : {
+      currentBuildId: 22, // Because
+      buildConfig: buildConfig,
+      alreadyBeingBuiltWithWaiters: {},
+      versionedResultsByPackageName: {}
+   };
+  var prevBuildExecutableResultsCache =
+    fs.existsSync(buildExecutableResultsCachePath) ?
+    JSON.parse(fs.readFileSync(buildExecutableResultsCachePath)) : {
+      currentBuildId: 22, // Because
+      buildConfig: buildConfig,
+      alreadyBeingBuiltWithWaiters: {},
+      versionedResultsByPackageName: {}
+   };
+  var prevLexResultsCache =
+    fs.existsSync(lexResultsCachePath) ?
+    JSON.parse(fs.readFileSync(lexResultsCachePath)) : {
+      currentBuildId: 22, // Because
+      alreadyBeingBuiltWithWaiters: {},
+      buildConfig: buildConfig,
+      versionedResultsByPackageName: {}
+   };
 
-  var onOcamldepDone = function(rootPackageConfig, walkResults) {
-    var makeScripts = buildScriptFromOCamldep(
-      previousResourceCache,
-      rootPackageConfig,
-      buildConfig,
-      walkResults
+  // Just in case they were serialized in an invalid state.
+  prevBuildPackagesResultsCache.alreadyBeingBuiltWithWaiters = {};
+  prevBuildExecutableResultsCache.alreadyBeingBuiltWithWaiters = {};
+  prevLexResultsCache.alreadyBeingBuiltWithWaiters = {};
+
+  var buildPackagesResultsCache = {
+    currentBuildId: prevBuildPackagesResultsCache.currentBuildId + 1,
+    alreadyBeingBuiltWithWaiters: {},
+    buildConfig: buildConfig,
+    versionedResultsByPackageName: {}
+  };
+  var buildExecutableResultsCache = {
+    currentBuildId: prevBuildExecutableResultsCache.currentBuildId + 1,
+    alreadyBeingBuiltWithWaiters: {},
+    buildConfig: buildConfig,
+    versionedResultsByPackageName: {}
+  };
+  var lexResultsCache = {
+    currentBuildId: prevLexResultsCache.currentBuildId + 1,
+    alreadyBeingBuiltWithWaiters: {},
+    buildConfig: buildConfig,
+    versionedResultsByPackageName: {}
+  };
+
+  var resourceCache = {};
+  var recordResult = recordPackageResourceCacheAndValidate(resourceCache, CWD);
+  var rootPackageName = recordResult.rootPackageName;
+  if (recordResult.foundInvalidPackage) {
+    logError('Some package is invalid. Fix reported errors.');
+    return;
+  }
+
+  var reportStatusAndBackup = function(successful) {
+    logTitle("Backing up caches:");
+    log('  Resource cache: ' + resourceCachePath);
+    log('  Build Packages Results cache: ' + buildPackagesResultsCachePath);
+    log('  Build Executable Results cache: ' + buildExecutableResultsCachePath);
+    log('  Yacc Results cache: ' + lexResultsCachePath);
+    log();
+    fs.writeFileSync(resourceCachePath, JSON.stringify(resourceCache));
+    fs.writeFileSync(buildPackagesResultsCachePath, JSON.stringify(buildPackagesResultsCache));
+    fs.writeFileSync(buildExecutableResultsCachePath, JSON.stringify(buildExecutableResultsCache));
+    fs.writeFileSync(lexResultsCachePath, JSON.stringify(lexResultsCache));
+
+    drawBuildGraph(resourceCache, buildPackagesResultsCache, rootPackageName);
+
+    if (!successful) {
+      logError('Build Failure: Fix errors and try again');
+    } else {
+      logProgress('Build Complete: Sucess!');
+    }
+  };
+
+  var continueToBuildExecutable = function() {
+    var rootBuildPackagesResults = buildPackagesResultsCache.versionedResultsByPackageName[rootPackageName];
+    var shouldRebuildExecutable =
+      somePackageResultNecessitatesRelinking(resourceCache, rootPackageName, buildPackagesResultsCache, buildPackagesResultsCache.currentBuildId) ||
+      getBuildConfigMightChangeCompilation(buildExecutableResultsCache.buildConfig, prevBuildExecutableResultsCache.buildConfig) ||
+      buildExecutableResultsCache.buildConfig.jsCompile && !prevBuildExecutableResultsCache.buildConfig.jsCompile;
+
+
+
+    if (rootBuildPackagesResults.lastSuccessfulBuildId !== buildPackagesResultsCache.currentBuildId) {
+      // No executable to build because a dependency failed.
+      reportStatusAndBackup(false);
+    } else if (shouldRebuildExecutable) {
+      logTitle('Building executable for ' + rootPackageName);
+      log();
+      var onExecutableDone = function(buildResults, computedData) {
+        if (!buildResults.err) {
+          logTitle('Executable built for ' + rootPackageName + ' at ' + computedData.executableArtifact);
+          log();
+          if (computedData.jsExecutableArtifact) {
+            logTitle('JavaScript Executable built for ' + rootPackageName + ' at ' + computedData.jsExecutableArtifact);
+            log();
+          }
+        }
+        // var buildResults = {commands: buildScriptForThisPackage, successfulResults: buildOutput, err: null};
+        var mostRecent = prevBuildExecutableResultsCache.versionedResultsByPackageName[rootPackageName];
+        if (!mostRecent) {
+          mostRecent = {
+            lastAttemptedBuildId: -1,
+            lastSuccessfulBuildId: -1,
+            lastSuccessfulPackageResource: null,
+            lastBuildIdEffectingProject: -1,
+            lastBuildIdEffectingDependents: -1,
+            results: null
+          };
+        }
+        var versionedResultForExecutable = {
+          lastAttemptedBuildId: buildExecutableResultsCache.currentBuildId,
+          lastSuccessfulBuildId: buildResults.err ? mostRecent.lastSuccessfulBuildId : buildExecutableResultsCache.currentBuildId,
+          lastSuccessfulPackageResource: buildResults.err ? mostRecent.lastSuccessfulPackageResource : resourceCache[rootPackageName],
+          lastBuildIdEffectingProject: buildResults.err ? mostRecent.lastBuildIdEffectingProject : buildExecutableResultsCache.currentBuildId,
+          lastBuildIdEffectingDependents: -1,
+          results: {
+            errorState: buildResults.err ? NodeErrorState.NodeFail : NodeErrorState.Success,
+            erroredSubpackages: [],
+            dependencyResults: emptyResult,
+            buildResults: buildResults,
+            computedData: computedData
+          }
+        };
+        cacheVersionedResultAndNotifyWaiters(buildExecutableResultsCache, rootPackageName, versionedResultForExecutable, []);
+        reportStatusAndBackup(!buildResults.err);
+      };
+      buildExecutable(rootPackageName, buildPackagesResultsCache, resourceCache, onExecutableDone);
+    } else {
+      // No executable to build because either nothing required it, or some dependency failed.
+      logTitle('Skipped rebuilding executable ' + rootPackageName);
+      log();
+      reportStatusAndBackup(true);
+    }
+  };
+
+  var continueToBuild = function() {
+    walkProjectTree(
+      rootPackageName,
+      buildPackagesResultsCache,
+      prevBuildPackagesResultsCache,
+      resourceCache,
+      prevResourceCache,
+      dirtyDetectingBuilder,
+      rootPackageName,
+      continueToBuildExecutable
     );
-    var onBuildFail = function(e) {
-      logError('Build Failed executing generated build script');
-      throw e;
-    };
-    var onBuildComplete = function(e) {
-      log('Backing up resource cache to ' + resourceCachePath);
-      logProgress('*Build Complete*');
-      fs.writeFileSync(
-        resourceCachePath,
-        JSON.stringify(computeResourceCache(buildConfig, walkResults))
-      );
-    };
-    // console.log('make script:\n', makeScripts.join('\n'));
-    executeScripts(makeScripts, '', onBuildFail, onBuildComplete, filterOutput);
   };
 
-  var shouldSkipDependencySteps = function(previousResourceCache, packageConfig) {
-    return (
-      previousResourceCache.byPath[packageConfig.realPath] &&
-      buildBypass.skipDependencyAnalysis
-    ) || !(
-      getMTimesChanged(previousResourceCache, packageConfig) ||
-      getFileSetChanged(previousResourceCache, packageConfig)
-    )
-  };
-
-  var continueToDependencyAnalysis = function() {
-    walkProjectTree(tree, function(packageConfig, onOneDone) {
-      verifyPackageConfig(packageConfig);
-      var packageResources = packageConfig.packageResources;
-      var onOcamldepFail = function(e) {
-        logError('Build failed executing finding dependency ordering for ' + packageConfig.packageName);
-        throw e;
-      };
-
-      if (shouldSkipDependencySteps(previousResourceCache, packageConfig)) {
-        log('> Skipping dependency computing for ' + packageConfig.packageName);
-        onOneDone({
-          packageConfig: packageConfig,
-          ocamldepOutput: previousResourceCache.byPath[packageConfig.realPath].ocamldepOutput
-        });
-        return;
-      }
-
-      var onOneOcamldepDone = function(oneOcamldepOutput) {
-        onOneDone({
-          packageConfig: packageConfig,
-          ocamldepOutput: removeBreaks(oneOcamldepOutput).split(' ').filter(function(s) {
-            return s !== '';
-          })
-        });
-      };
-      var findlibOCamldepCommand = getFindlibCommand(packageConfig, programForCompiler(OCAMLDEP), false);
-      log('> Computing dependencies for ' + packageConfig.packageName + '\n\n');
-      var preprocessor = packageConfig.packageJSON.CommonML.preprocessor;
-      var cmd =
-        [findlibOCamldepCommand]
-        .concat(getOCamldepFlags(packageConfig))
-        .join(' ');
-      log(cmd);
-      var scripts = [{
-        description: 'ocamldep script',
-        scriptLines: [cmd],
+  var yaccBuilder = function(rootPackageName, resultsCache, lexResultsCache, resourceCache, prevResourceCache, packageName, onDirtyDetectingBuilderDone) {
+    var resource = resourceCache[packageName];
+    var packageResources = resource.packageResources;
+    var changedLexYaccFiles =
+      getLexYaccFilesRequiringRecompilation(resourceCache, prevResourceCache, packageName);
+    var scripts =
+      changedLexYaccFiles.yacc.length === 0 ? [] : [{
+        description: 'Yaccing files',
+        scriptLines: changedLexYaccFiles.yacc.map(function(absoluteFilePath) {
+          var ocamlYaccCommand = [OCAMLYACC, absoluteFilePath].join(' ');
+          return ['echo "Running ocamlyacc:\n' + ocamlYaccCommand + '"', ocamlYaccCommand].join('\n');
+        }),
         onFailShouldContinue: false
       }];
-      executeScripts(scripts, '', onOcamldepFail, onOneOcamldepDone, filterOutput);
-    }, onOcamldepDone);
-  };
 
+    var scriptLines = changedLexYaccFiles.lex.map(function(absoluteFilePath) {
+      var ocamlLexCommand = [OCAMLLEX, absoluteFilePath].join(' ');
+      return ['echo "Running ocamlyacc:\n' + ocamlLexCommand + '"', ocamlLexCommand].join('\n');
+    });
+    scripts = scripts.concat(
+      changedLexYaccFiles.lex.length === 0 ? [] : [{
+        description: 'Lexing files',
+        scriptLines: scriptLines,
+        onFailShouldContinue: false
+      }]
+    );
+    var onLexYaccFail = function(e) {
+      var buildResults = {
+        commands: scriptLines,
+        successfulResults: null,
+        err: e
+      };
+      onDirtyDetectingBuilderDone(emptyResult, buildResults, {}, true, true);
+      logError('Build Fail during ocamllex/ocamlyacc for ' + resource.packageName);
+      throw e;
+    };
+
+    var onOneOcamlYaccLexDone = function(oneOcamlLexYaccOutput) {
+      var buildResults = {commands: scriptLines, successfulResults: oneOcamlLexYaccOutput, err: null};
+      onDirtyDetectingBuilderDone(emptyResult, buildResults, {}, true, true);
+    };
+
+    if (scripts.length) {
+      log('> Running lex/yacc ' + resource.packageName + '\n\n');
+    }
+    executeScripts(scripts, '', onLexYaccFail, onOneOcamlYaccLexDone);
+  };
 
   // Lex,yacc generate their own .mli/ml artifacts. If we just find all the
   // mll/mly that have changed since last time, run them through ocamllex/yacc
@@ -1922,75 +2221,47 @@ function buildTree(tree) {
   // minimal sets of recompilations for these artifacts.  TODO: Store the
   // output in the _build directory (currently it's difficult because that
   // isn't be done until the final build step).
-  walkProjectTree(tree, function(packageConfig, onOneDone) {
-    verifyPackageConfig(packageConfig);
-    var packageResources = packageConfig.packageResources;
-    var onLexYaccFail = function(e) {
-      logError('Build Fail during ocamllex/ocamlyacc for ' + packageConfig.packageName);
-      throw e;
-    };
-
-    if (shouldSkipDependencySteps(previousResourceCache, packageConfig)) {
-      log('> Skipping lex/yacc for ' + packageConfig.packageName);
-      onOneDone({});
-      return;
-    }
-    var onOneOcamlYaccLexDone = function(oneOcamldepOutput) {
-      onOneDone({
-        packageConfig: packageConfig,
-        ocamldepOutput: removeBreaks(oneOcamldepOutput).split(' ').filter(function(s) {
-          return s !== '';
-        })
-      });
-    };
-
-    var changedLexYaccFiles =
-      getLexYaccFilesRequiringRecompilation(previousResourceCache, packageConfig);
-    var scripts =
-      changedLexYaccFiles.yacc.length === 0 ? [] : [{
-        description: 'Yaccing files',
-        scriptLines: changedLexYaccFiles.yacc.map(function(absoluteFilePath) {
-          var ocamlYaccCommand = [OCAMLYACC, absoluteFilePath].join(' ');
-          return [
-            'echo "Running ocamlyacc:\n' + ocamlYaccCommand + '"',
-            ocamlYaccCommand
-          ].join('\n');
-        }),
-        onFailShouldContinue: false
-      }];
-
-    scripts = scripts.concat(
-      changedLexYaccFiles.lex.length === 0 ? [] : [{
-        description: 'Lexing files',
-        scriptLines: changedLexYaccFiles.lex.map(function(absoluteFilePath) {
-          var ocamlLexCommand = [OCAMLLEX, absoluteFilePath].join(' ');
-          return [
-            'echo "Running ocamlyacc:\n' + ocamlLexCommand + '"',
-            ocamlLexCommand
-          ].join('\n');
-        }),
-        onFailShouldContinue: false
-      }]
+  if (buildConfig.yacc) {
+    logTitle('Building yacc dependencies for ' + rootPackageName);
+    log();
+    walkProjectTree(
+      rootPackageName,
+      lexResultsCache,
+      prevLexResultsCache,
+      resourceCache,
+      prevResourceCache,
+      yaccBuilder,
+      rootPackageName,
+      function() {
+        /**
+         * Now that all projects have their mll/mly converted, scan all the
+         * resources again. This should enventually be more cleanly integrated
+         * to not produce artifacts in the source directories.
+         */
+        resourceCache = {};
+        recordPackageResourceCacheAndValidate(resourceCache, CWD);
+        var rootPackageName = recordResult.rootPackageName;
+        if (recordResult.foundInvalidPackage) {
+          logError('Some package is invalid. Fix reported errors.');
+          return;
+        }
+        continueToBuild();
+      }
     );
-
-    if (scripts.length) {
-      log('> Running lex/yacc ' + packageConfig.packageName + '\n\n');
-    }
-    executeScripts(scripts, '', onLexYaccFail, onOneOcamlYaccLexDone, filterOutput);
-  }, continueToDependencyAnalysis);
-
-
+  } else {
+    logTitle('Building dependency packages for ' + rootPackageName);
+    log();
+    continueToBuild();
+  }
 }
 
-var tree;
 var whenVerifiedPath = function() {
   try {
-    log('Scanning files from ' + CWD);
-    tree = getProjectPackageConfigTree(CWD);
+    logTitle('Scanning files from ' + CWD);
+    log();
     try {
-      verifyPackageConfig(tree);
       try {
-        buildTree(tree);
+        buildTree();
       } catch (e) {
         logError('Dependencies scanned and verified, but failed to build');
         logErrorException(e);
