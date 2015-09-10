@@ -1376,8 +1376,16 @@ var discoverDeps = function(resourceCache, packageName, onDone) {
   executeScripts(scripts, '', onOcamldepFail, onOneOcamldepDone);
 };
 
+var chromeProgram =
+  fs.existsSync('/Applications/Google\ Chrome\ Canary.app/Contents/MacOS/Google\ Chrome\ Canary') ?
+    '/Applications/Google\\ Chrome\\ Canary.app/Contents/MacOS/Google\\ Chrome\\ Canary' :
+  fs.existsSync('/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome') ?
+    '/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome' : null;
+
 var getEchoJsCommand = function(jsArtifact, dirToContainJsBuildDirSymlink) {
-  return 'echo "' + [
+  var indexHtmlFile = 'file:\/\/' + dirToContainJsBuildDirSymlink + '\/index.html';
+  var ret = [
+    '',
     '#',
     '# JavaScript Package at: ' + jsArtifact,
     '# ======================================',
@@ -1386,23 +1394,25 @@ var getEchoJsCommand = function(jsArtifact, dirToContainJsBuildDirSymlink) {
     '# --------------------',
     '# - Create an index html page (that includes script ./jsBuild/app.js) at :',
     '#',
-    '#    file:\/\/' + dirToContainJsBuildDirSymlink + '/index.html ',
+    '#    ' + indexHtmlFile,
     '#',
-    '# - Then you can serve it using python via:',
+    '# - To see source maps and to enable ajax requests to your local file system, ',
+    '# open Chrome with the local file access flag --allow-file-access-from-files. ',
+    '# Enable Chromes source maps in settings, open the debugger then *refresh*.',
+    '#',
+    !chromeProgram ? '#' : '#    ' + chromeProgram + ' --allow-file-access-from-files ' + indexHtmlFile,
+    '#',
+    '# - Optionally, serve using python and visit via the following URL (source maps wont work):',
     '#',
     '#    pushd ' + dirToContainJsBuildDirSymlink + ' && python -m SimpleHTTPServer || popd',
-    '#',
-    '# - And open it by clicking on:',
-    '#',
-    '#    http:\/\/localhost:8000\/index.html ',
-    '#',
-    '# - Open in Chrome, open the dev tools, *then* refresh to see source maps.',
-    '#',
+    '#    open http:\/\/localhost:8000\/index.html ',
     '# Test in JavaScriptCore',
     '# -----------------------',
-    '#  /System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Resources/jsc -e \\"console = {log:print};\\" -f ' + jsArtifact,
-    '#'
-  ].join('\n') + '"';
+    '#  /System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Resources/jsc -e "console = {log:print};" -f ' + jsArtifact,
+    '#',
+    ''
+  ].join('\n');
+  return ret;
 };
 
 // We could pass all of `ocamldepOrderedSourceFiles`, but that creates
@@ -1481,12 +1491,15 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
     jsArtifactRelativeForm
   ].join(' ');
   var echoJSMessage = getEchoJsCommand(jsArtifact, dirToContainJsBuildDirSymlink);
-  var buildJSCommands = (shouldCompileExecutableIntoJS ? [
-    ensureJsBuildDirCommand,
-    changeDir,
-    buildJSArtifactCommand,
-    echoJSMessage
-  ].concat(symlinkBuildDirCommands) : []).join('\n');
+  var buildJSCommands = (
+    shouldCompileExecutableIntoJS ? [
+      ensureJsBuildDirCommand,
+      changeDir,
+      buildJSArtifactCommand,
+      symlinkBuildDirCommands,
+      echoJSMessage
+    ] : []
+  ).join('\n');
 
   var compileCommands = [compileExecutableCommand].concat(shouldCompileExecutableIntoJS ? [buildJSCommands] : []);
 
