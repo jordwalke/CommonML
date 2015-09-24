@@ -1473,7 +1473,7 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
   var symlinkBuildDirCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
     path.join(dirToContainJsBuildDirSymlink, 'jsBuild'),
     jsBuildDir
-  );
+  ).join('\n');
 
   // The cp command is such a broken API - there isn't a way to overwrite
   // an entire directory.
