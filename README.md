@@ -466,6 +466,16 @@ used simultaneously.
 TODO:
 =====
 
+  - Currently an "inconsistent interface" message can occur when an interface
+    file does *not* exist for an implementation file. This happens because the
+    arguments to a compilation command does not inlude an interface for obvious
+    reasons, yet there is an *automatically* generated interface cmi sitting in
+    the build directory. That cmi could be an *outdated* cmi. If there was a
+    real existing interface file, the cmi would get overwritten by a fresh,
+    non-conflicting build artifact. The quick solution is to remove all .cmi's
+    for every implementation that does not have a corresponding interface file.
+    (Or even more generally, remove all the artifacts that we didn't
+    *explicitly* supply as an output.).
   - Replicate this development flow with OPAM/ocamlbuild to see how
     close we can get.
   - Different configurable compiler flags for `byte` vs `native`.
