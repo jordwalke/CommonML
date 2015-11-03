@@ -245,21 +245,21 @@ var log = function() {
 };
 
 var logError = function() {
-  var msg = clc.xterm(202);
+  var msg = clc.red;
   console.log(msg.apply(msg, arguments));
 };
 var logTitle = function() {
   if (cliConfig.silent) {
     return;
   }
-  var msg = clc.xterm(222);
+  var msg = clc.yellow;
   console.log(msg.apply(msg, arguments));
 };
 var logProgress = function() {
   if (cliConfig.silent) {
     return;
   }
-  var msg = clc.xterm(71);
+  var msg = clc.green;
   console.log(msg.apply(msg, arguments));
 };
 
@@ -735,14 +735,21 @@ var verifyPackageConfig = function(packageResource, resourceCache) {
     }
   }
 
+  // package.json lists it as a "dependency"
   for (var commonMLDependencyName in packageJSON.dependencies) {
+    // Yet the CommonML dependency analyzer did not pick it up as a dependency.
     if (commonMLDependencyName !== 'CommonML' && subpackageNames.indexOf(commonMLDependencyName) === -1) {
-      foundErrors.push(
-        packageName + ' depends on ' + commonMLDependencyName + ' but ' + commonMLDependencyName +
-        ' isn\'t installed in '+ path.join(realPath, 'node_modules') + ':\n\n' +
-        '  1. Either run npm install (or npm link ' + commonMLDependencyName + ') from within ' + realPath + '.\n' +
-        '  2. Or remove ' + subpackageName + ' as a dependency of ' + packageName + ' by editing ' + path.join(realPath, 'package.json')
-      );
+      // This could be because it either doesn't exist, or it exists but is not a CommonML dependency.
+      var exists = directoryExistsSync(path.join(path.join(realPath, 'node_modules'), commonMLDependencyName));
+      var isNotACommonMLDependency = !exists;
+      if (isNotACommonMLDependency) {
+        foundErrors.push(
+          packageName + ' depends on ' + commonMLDependencyName + ' but ' + commonMLDependencyName +
+          ' isn\'t installed in '+ path.join(realPath, 'node_modules') + ':\n\n' +
+          '  1. Either run npm install (or npm link ' + commonMLDependencyName + ') from within ' + realPath + '.\n' +
+          '  2. Or remove ' + commonMLDependencyName + ' as a dependency of ' + packageName + ' by editing ' + path.join(realPath, 'package.json')
+        );
+      }
     }
   }
 
@@ -1216,19 +1223,21 @@ function getSubprojectPackageDescriptors(nodeModulesDir) {
     var realPath = fs.realpathSync(fullPath);
     if (fs.statSync(realPath).isDirectory()) {
       var packageJSON = getPackageJSONForPackage(realPath);
-      if (packageJSON && packageJSON.CommonML && packageName !== 'CommonML') {
+      if (packageJSON) {
         var nameField = packageJSON.name;
-        if (!nameField) {
-          throw new Error("Cannot find `name` field in package.json for " +  fullPath);
+        if (packageJSON.CommonML && packageName !== 'CommonML') {
+          if (!nameField) {
+            throw new Error("Cannot find `name` field in package.json for " +  fullPath);
+          }
+          if (nameField !== packageName) {
+            throw new Error("packageName and directory are different - this is fine. Delete this error. " +  fullPath);
+          }
+          ret = ret || {};
+          ret[nameField] = {
+            realPath: realPath,
+            packageJSON: packageJSON
+          };
         }
-        if (nameField !== packageName) {
-          throw new Error("packageName and directory are different - this is fine. Delete this error. " +  fullPath);
-        }
-        ret = ret || {};
-        ret[nameField] = {
-          realPath: realPath,
-          packageJSON: packageJSON
-        };
       }
     }
   }
@@ -1482,10 +1491,10 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
   var buildJSArtifactCommand = shouldCompileExecutableIntoJS && [
     'js_of_ocaml',
     '--source-map',
+    '--no-inline',
     '--debug-info',
     '--pretty',
     '--linkall',
-    '--noinline',
     executableArtifact,
     '-o',
     jsArtifactRelativeForm
