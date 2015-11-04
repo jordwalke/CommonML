@@ -9,6 +9,7 @@ var optimist = require('optimist');
 var clc = require('cli-color');
 var whereis = require('whereis');
 var colors = require('colors/safe');
+var extractDiagnostics = require('./extractDiagnostics');
 var argv = optimist.argv;
 
 var STYLE = path.join(__dirname, 'docGenerator', 'docStyle.css');
@@ -101,7 +102,8 @@ var renderClickableFileName = function(fileDiagnostic) {
 var renderFileDiagnostic = function(fileDiagnostic) {
   return [
     clc.red("[" + fileDiagnostic.type + "] " + renderClickableFileName(fileDiagnostic)),
-    clc.red(fileDiagnostic.text)
+    clc.red(fileDiagnostic.text),
+    clc.red(fileDiagnostic.commonMLData.originalStdErr)
   ].join('\n');
 };
 
@@ -342,7 +344,8 @@ var log = function() {
   if (cliConfig.silent) {
     return;
   }
-  console.log.apply(console.log, arguments);
+  var msg = clc.white;
+  console.log(msg.apply(msg, arguments));
 };
 
 var logError = function() {
@@ -2154,12 +2157,15 @@ var getBuildConfigMightChangeCompilation = function(buildConfig, prevBuildConfig
     prevBuildConfig.forDebug !== buildConfig.forDebug;
 };
 
-
 function buildTree() {
   var resourceCachePath =
     path.join(CWD, actualBuildDir(buildConfig), '__resourceCache.json');
-  var packageErrorsPath =
-    path.join(CWD, actualBuildDir(buildConfig), '__packageErrors.json');
+  var packageDiagnosticsPath =
+    path.join(CWD, actualBuildDir(buildConfig), '__packageDiagnostics.json');
+  var compileDiagnosticsPath =
+    path.join(CWD, actualBuildDir(buildConfig), '__compileDiagnostics.json');
+  var linkDiagnosticsPath =
+    path.join(CWD, actualBuildDir(buildConfig), '__linkDiagnostics.json');
   var compilerErrorsPath =
     path.join(CWD, actualBuildDir(buildConfig), '__compilerErrors.json');
   var lexResultsCachePath =
@@ -2224,8 +2230,8 @@ function buildTree() {
   if (recordResult.foundPackageInvalidations.length) {
     logError(errorFormatter(recordResult.foundPackageInvalidations));
     log();
-    log('Writing Package Errors: ' + packageErrorsPath);
-    fs.writeFileSync(packageErrorsPath, JSON.stringify(recordResult.foundPackageInvalidations));
+    log('Writing Package Errors: ' + packageDiagnosticsPath);
+    fs.writeFileSync(packageDiagnosticsPath, JSON.stringify(recordResult.foundPackageInvalidations));
     return;
   }
 
@@ -2240,6 +2246,14 @@ function buildTree() {
     fs.writeFileSync(buildPackagesResultsCachePath, JSON.stringify(buildPackagesResultsCache));
     fs.writeFileSync(buildExecutableResultsCachePath, JSON.stringify(buildExecutableResultsCache));
     fs.writeFileSync(lexResultsCachePath, JSON.stringify(lexResultsCache));
+
+    var compileDiagnostics = extractDiagnostics.fromStdErrForAllPackages(buildPackagesResultsCache);
+    var linkDiagnostics = extractDiagnostics.fromStdErrForAllPackages(buildExecutableResultsCache);
+    fs.writeFileSync(compileDiagnosticsPath, JSON.stringify(compileDiagnostics));
+    fs.writeFileSync(linkDiagnosticsPath, JSON.stringify(linkDiagnostics));
+
+    log(errorFormatter(compileDiagnostics));
+    log(errorFormatter(linkDiagnostics));
 
     drawBuildGraph(resourceCache, buildPackagesResultsCache, rootPackageName);
 
@@ -2402,8 +2416,8 @@ function buildTree() {
         if (recordResult.foundPackageInvalidations.length) {
           logError(errorFormatter(recordResult.foundPackageInvalidations));
           log();
-          log('Writing Package Errors: ' + packageErrorsPath);
-          fs.writeFileSync(packageErrorsPath, JSON.stringify(recordResult.foundPackageInvalidations));
+          log('Writing Package Errors: ' + packageDiagnosticsPath);
+          fs.writeFileSync(packageDiagnosticsPath, JSON.stringify(recordResult.foundPackageInvalidations));
           return;
         }
         continueToBuild();
