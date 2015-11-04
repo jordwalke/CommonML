@@ -1459,7 +1459,7 @@ var executeScripts = function(scripts, outputSoFar, onFailTerminate, onDone, fil
         executeScripts(nextScripts, outputSoFar + stdout, onFailTerminate, onDone, filterOutput);
       } else {
         log('Cannot recover from error - stopping the build.');
-        onFailTerminate(error || stderr);
+        onFailTerminate(stderr);
       }
     });
   }
