@@ -103,7 +103,7 @@ var renderFileDiagnostic = function(fileDiagnostic) {
   return [
     clc.red("[" + fileDiagnostic.type + "] " + renderClickableFileName(fileDiagnostic)),
     clc.red(fileDiagnostic.text),
-    clc.red(fileDiagnostic.commonMLData.originalStdErr)
+    fileDiagnostic.commonMLData && clc.red(fileDiagnostic.commonMLData.originalStdErr)
   ].join('\n');
 };
 

@@ -181,7 +181,11 @@ exports.extractFromStdErr = function(originatingCommands, stdErrorOutput) {
      type: 'ERROR',
      text: stdErrorOutput,
      commonMLData: {
-       kind: "Project.Unknown"
+       kind: "Project.Unknown",
+       originalStdErr: stdErrorOutput,
+       originatingCommands: originatingCommands,
+       kind: 'UNKNOWN',
+       details: {}
      }
     });
   }
