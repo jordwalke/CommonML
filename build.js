@@ -295,15 +295,24 @@ var drawBuildGraph =  function(resourceCache, resultsCache, rootPackageName) {
 
   var executableTitle = "Executable(" + getTitle(resultsCache, rootPackageName) + ")";
   var tree = [executableTitle, getBuildGraph({}, resourceCache, resultsCache, rootPackageName)];
-  log();
-  logTitle("Build Graph:");
-  log("⋯ = Uninteresting nodes - already shown elsewhere, no build operations.");
-  log("☑ = Rebuild Success");
-  log("☒ = Rebuild Failed");
-  log("☐ = Rebuild Blocked");
-  log();
-  log(asciitree(tree));
-  log();
+  var buildTreeLines = [
+    "",
+    clc.yellow("Build Graph:"),
+    "⋯ = Uninteresting nodes - already shown elsewhere, no build operations.",
+    "☑ = Rebuild Success",
+    "☒ = Rebuild Failed",
+    "☐ = Rebuild Blocked",
+    "",
+    asciitree(tree),
+    "",
+    ""
+  ];
+  var buildTreeText = buildTreeLines.join('\n');
+  var style = {
+    "☒": clc.red('☒'),
+    "☑": clc.green('☑')
+  };
+  log(clc.art(buildTreeText, style));
 };
 
 var buildBypass = {
