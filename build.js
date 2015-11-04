@@ -22,6 +22,89 @@ var OCAMLYACC = 'ocamlyacc';
 var OCAMLDOC = 'ocamldoc';
 var OCAMLFIND = 'ocamlfind';
 
+/**
+ * Error output adheres to the following Nuclide type definitions.
+ *
+ *  // From Atom:
+ *  type Range = [[int,int], [int, int]]
+ *
+    type MessageType = 'Error' | 'Warning';
+ *
+ *  type DiagnosticProviderUpdate = {
+ *    filePathToMessages?: Map<string, Array<FileDiagnosticMessage>>;
+ *    projectMessages?: Array<ProjectDiagnosticMessage>;
+ *  };
+ *
+ *  type FileDiagnosticMessage = {
+ *    scope: 'file';
+ *    providerName: string;
+ *    type: MessageType;
+ *    filePath: string;
+ *    text?: string;
+ *    html?: string;
+ *    range?: Range;
+ *    trace?: Array<Trace>;
+ *  };
+ *
+ *  type ProjectDiagnosticMessage = {
+ *    scope: 'project';
+ *    providerName: string;
+ *    type: MessageType;
+ *    text?: string;
+ *    html?: string;
+ *    range?: Range;
+ *    trace?: Array<Trace>;
+ *  };
+ *
+ *  type Trace = {
+ *    type: 'Trace';
+ *    text?: string;
+ *    html?: string;
+ *    filePath: string;
+ *    range?: Range;
+ *  };
+ *
+ *  type InvalidationMessage = {
+ *    scope: 'file';
+ *    filePaths: Array<string>;
+ *  } | {
+ *    scope: 'project';
+ *  } | {
+ *    scope: 'all';
+ *  };
+ */
+
+var createFileDiagnostic = function(path, text) {
+  return {
+    scope: 'file',
+    providerName: 'CommonML',
+    type: 'ERROR',
+    filePath: path,
+    text: text,
+    range: [[1, 0], [1, 0]]
+  };
+};
+
+var renderFileRange = function(range) {
+  return ":" + ("" + range[0][0]) + (
+    range[0][1] != null ?
+      " characters " + range[0][1] + (range[1] ? "-" + range[1][1] : "") :
+      ""
+  );
+};
+
+var renderClickableFileName = function(fileDiagnostic) {
+  var append = fileDiagnostic.range ? renderFileRange(fileDiagnostic.range) : "";
+  return fileDiagnostic.filePath + append;
+};
+
+var renderFileDiagnostic = function(fileDiagnostic) {
+  return [
+    clc.red("[" + fileDiagnostic.type + "] " + renderClickableFileName(fileDiagnostic)),
+    clc.red(fileDiagnostic.text)
+  ].join('\n');
+};
+
 var cliConfig = {
   hidePath: argv.hidePath,
   silent: argv.silent
@@ -56,8 +139,17 @@ var buildConfig = {
   forDebug: argv.forDebug === 'true',
   jsCompile: argv.jsCompile === 'true',
   // The path to graphical debugger (coming soon).
-  rebuggerPath: argv.rebuggerPath || null
+  rebuggerPath: argv.rebuggerPath || null,
+  errorFormatter: argv.errorFormatter || 'default'
 };
+
+var defaultErrorFormatter = function(diagnostics) {
+  return diagnostics.map(renderFileDiagnostic).join('\n\n');
+};
+
+var errorFormatter =
+  buildConfig.errorFormatter === 'default' ? defaultErrorFormatter :
+  require(path.join(CWD, buildConfig.errorFormatter));
 
 function invariant(bool, msg) {
   if (!bool) {
@@ -246,6 +338,9 @@ var log = function() {
 
 var logError = function() {
   var msg = clc.red;
+  if (cliConfig.silent) {
+    return;
+  }
   console.log(msg.apply(msg, arguments));
 };
 var logTitle = function() {
@@ -705,53 +800,85 @@ var ensureNotMisCase = function(packageName, validateThis, propperCases) {
   return foundErrors;
 };
 
+// Split out so that it can be done before the dependencies are validated.
+var verifyPackageJSONFile = function(packageName, containingDir, packageJSON) {
+  var packageJSONPath = path.join(containingDir, 'package.json');
+  var msg = 'Invalid package.json for ' + packageName + ' at ' + packageJSONPath + '.\n';
+  var foundPackageJSONInvalidations = [];
+  var lowerKeys = Object.keys(packageJSON).map(function(k) {
+    return k.toLowerCase();
+
+  });
+  if (!('CommonML' in packageJSON)) {
+    if (lowerKeys.indexOf('commonml') !== -1) {
+      return [createFileDiagnostic(packageJSONPath, msg + 'Fix spelling in package.json: It should be spelled "CommonML".')];
+    } else {
+      return [];
+    }
+  }
+  var CommonML = packageJSON.CommonML;
+
+  if(!packageName || !packageName.length || packageName[0].toUpperCase() !== packageName[0]) {
+    foundPackageJSONInvalidations.push(createFileDiagnostic(packageJSONPath, msg + 'package.json `name` must begin with a capital letter.'));
+  }
+  if(!packageJSON) {
+    foundPackageJSONInvalidations.push(createFileDiagnostic(packageJSONPath, msg + 'Must have package.json'));
+  }
+  if(!CommonML.exports) {
+    foundPackageJSONInvalidations.push(createFileDiagnostic(packageJSONPath, msg + 'Must specify exports'));
+  }
+  if(CommonML.export) {
+    foundPackageJSONInvalidations.push(createFileDiagnostic(packageJSONPath, msg + '"export" is not a valid field of "CommonML" in package.json'));
+  }
+  var miscased = ensureNotMisCase(packageName, CommonML, {
+    exports: true,
+    compileFlags: true,
+    linkFlags: true,
+    jsPlaceBuildArtifactsIn: true,
+    docFlags: true,
+    extensions: true,
+    preprocessor: true,
+    findlibPackages: true
+  });
+  miscased = miscased.concat(ensureNotMisCase(packageName, packageJSON, {
+    CommonML: true
+  }));
+  if (miscased.length !== 0) {
+    miscased.forEach(function(miscasing) {
+      foundPackageJSONInvalidations.push(
+        createFileDiagnostic(packageJSONPath, msg + miscasing)
+      );
+    });
+  }
+
+  var htmlPage = CommonML.jsPlaceBuildArtifactsIn;
+  if (htmlPage) {
+    if(typeof htmlPage !== 'string') {
+      foundPackageJSONInvalidations.push(createFileDiagnostic(packageJSONPath, packageName + ' htmlPage field must be a string'));
+    }
+    if(htmlPage.charAt(0) === '/' || htmlPage.charAt(0) === '.') {
+      foundPackageJSONInvalidations.push(
+        createFileDiagnostic(packageJSONPath, packageName + ' htmlPage must be relative to the package root with no leading slash or dot')
+      );
+    }
+    if(htmlPage.charAt(htmlPage.length - 1) === '/') {
+      foundPackageJSONInvalidations.push(
+        createFileDiagnostic(packageJSONPath, packageName + 'has a jsPlaceBuildArtifactsIn that ends with a slash. Remove the slash')
+      );
+    }
+  }
+  return foundPackageJSONInvalidations;
+};
+
 var verifyPackageConfig = function(packageResource, resourceCache) {
+  var foundErrors = [];
   var realPath = packageResource.realPath;
   var packageName = packageResource.packageName;
+  var packageJSONPath = path.join(realPath, 'package.json');
   var packageJSON = packageResource.packageJSON;
   var CommonML = packageJSON.CommonML;
   var msg = 'Invalid package ' + packageName + ' at ' + realPath + '. ';
 
-  if (!CommonML) {
-    // Not a CommonML package
-    return false;
-  }
-
-  var foundErrors = [];
-  var subpackageNames = packageResource.subpackageNames;
-  for (var i = 0; i < subpackageNames.length; i++) {
-    var subpackageName = subpackageNames[i];
-    var subpackage = resourceCache[subpackageName];
-    if(packageJSON.dependencies && !packageJSON.dependencies[subpackageName]) {
-      foundErrors.push(
-        'Package named "' + subpackageName + '" was found in ' + packageName +
-        '\'s node_module directory, but ' + packageName + ' doesn\'t depend on ' + subpackageName +
-        ': \n\n' +
-        '  1. Either edit ' + path.join(realPath, 'package.json') + ' to include ' +
-        subpackageName + ' as a dependency.\n'  +
-        '  2. Or remove/unlink the package named ' + subpackageName +
-        ' inside ' + path.join(realPath, 'node_modules') + ' .'
-      );
-    }
-  }
-
-  // package.json lists it as a "dependency"
-  for (var commonMLDependencyName in packageJSON.dependencies) {
-    // Yet the CommonML dependency analyzer did not pick it up as a dependency.
-    if (commonMLDependencyName !== 'CommonML' && subpackageNames.indexOf(commonMLDependencyName) === -1) {
-      // This could be because it either doesn't exist, or it exists but is not a CommonML dependency.
-      var exists = directoryExistsSync(path.join(path.join(realPath, 'node_modules'), commonMLDependencyName));
-      var isNotACommonMLDependency = !exists;
-      if (isNotACommonMLDependency) {
-        foundErrors.push(
-          packageName + ' depends on ' + commonMLDependencyName + ' but ' + commonMLDependencyName +
-          ' isn\'t installed in '+ path.join(realPath, 'node_modules') + ':\n\n' +
-          '  1. Either run npm install (or npm link ' + commonMLDependencyName + ') from within ' + realPath + '.\n' +
-          '  2. Or remove ' + commonMLDependencyName + ' as a dependency of ' + packageName + ' by editing ' + path.join(realPath, 'package.json')
-        );
-      }
-    }
-  }
 
   var sourceFiles = packageResource.packageResources.sourceFiles;
   for (var i = 0; i < sourceFiles.length; i++) {
@@ -763,68 +890,21 @@ var verifyPackageConfig = function(packageResource, resourceCache) {
       var basenameBase = path.basename(sourceFile, extName);
       if (basenameBase.toLowerCase() === packageResource.packageName.toLowerCase()) {
         foundErrors.push(
-          msg + 'Package cannot contain module with same name as project ' +
-          '(' + sourceFile + ')'
+          createFileDiagnostic(sourceFile,  msg + 'Package cannot contain module with same name as project (' + sourceFile + ')')
         );
       }
     }
   }
 
-  foundErrors = foundErrors.concat(ensureNotMisCase(packageName, CommonML, {
-    exports: true,
-    compileFlags: true,
-    linkFlags: true,
-    jsPlaceBuildArtifactsIn: true,
-    docFlags: true,
-    extensions: true,
-    preprocessor: true,
-    findlibPackages: true
-  }));
-
-  var htmlPage = CommonML.jsPlaceBuildArtifactsIn;
-  if (htmlPage) {
-    if(typeof htmlPage !== 'string') {
-      foundErrors.push(packageName + ' htmlPage field must be a string');
-    }
-    if(htmlPage.charAt(0) === '/' || htmlPage.charAt(0) === '.') {
-      foundErrors.push(
-        packageName + ' htmlPage must be relative to the package root with no leading slash or dot'
-      );
-    }
-    if(htmlPage.charAt(htmlPage.length - 1) === '/') {
-      foundErrors.push(
-        packageName + 'has a jsPlaceBuildArtifactsIn that ends with a slash. Remove the slash'
-      );
-    }
-  }
-
-  if(!packageResource.realPath) {
-    foundErrors.push(msg + 'No path for package.');
-  }
-  if(!packageName || !packageName.length || packageName[0].toUpperCase() !== packageName[0]) {
-    foundErrors.push(msg + 'package.json `name` must begin with a capital letter.');
-  }
-  if(!packageJSON) {
-    foundErrors.push(msg + 'Must have package.json');
-  }
-  if(packageJSON.CommonMl ||
-     packageJSON.commonMl ||
-     packageJSON.commonML ||
-     packageJSON.commonml) {
-    foundErrors.push(msg + 'Fix spelling in package.json: It should be spelled "CommonML".');
-  }
-  if(!CommonML.exports) {
-    foundErrors.push(msg + 'Must specify exports');
-  }
-  if(CommonML.export) {
-    foundErrors.push(msg + '"export" is not a valid field of "CommonML" in package.json');
+  if (!realPath) {
+    foundErrors.push(createFileDiagnostic(packageJSONPath, msg + 'No path for package.'));
   }
   CommonML.exports.forEach(function(exportName) {
-    exportName === '' && foundErrors.push('package.json specifies an exported CommonML module that is the empty string');
-    path.extname(exportName) !== '' && foundErrors.push(msg + 'Exports must be module names, not files');
-    exportName[0].toUpperCase() !== exportName[0] && foundErrors.push(msg + 'Exports must be module names - capitalized leading chars.');
+    exportName === '' && foundErrors.push(createFileDiagnostic(packageJSONPath, 'package.json specifies an exported CommonML module that is the empty string'));
+    path.extname(exportName) !== '' && foundErrors.push(createFileDiagnostic(packageJSONPath, msg + 'Exports must be module names, not files'));
+    exportName[0].toUpperCase() !== exportName[0] && foundErrors.push(createFileDiagnostic(packageJSONPath, msg + 'Exports must be module names - capitalized leading chars.'));
     basenameBase === lowerBase(packageResource.packageName) &&
-      foundErrors.push(msg + 'Cannot export the same module name as the package name:' + exportName);
+      foundErrors.push(createFileDiagnostic(packageJSONPath, msg + 'Cannot export the same module name as the package name:' + exportName));
   });
 
   var extensions = packageResource.packageJSON.CommonML.extensions;
@@ -832,17 +912,49 @@ var verifyPackageConfig = function(packageResource, resourceCache) {
     for (var i = 0; i < extensions && extensions.length; i++) {
       var extension = extensions[i];
       !(extension['interface'] && extension['implementation']) &&
-        foundErrors.push(packageName + ' has misformed extensions');
+        foundErrors.push(createFileDiagnostic(packageJSONPath, packageName + ' has misformed extensions'));
       !(extension['interface'].charAt(0) === '.' && extension['implementation'].charAt(0) === '.') &&
         packageName + ' has extensions that do not start with a (.) - ' +
         'extensions should look like [{"intf": ".blai", "impl": ".bla"}]';
     }
   }
-  var errorMessage = foundErrors.join('\n\n');
-  if (foundErrors.length) {
-    logError('\n' + errorMessage + '\n');
+  var subpackageNames = packageResource.subpackageNames;
+  for (var i = 0; i < subpackageNames.length; i++) {
+    var subpackageName = subpackageNames[i];
+    var subpackage = resourceCache[subpackageName];
+    if(packageJSON.dependencies && !packageJSON.dependencies[subpackageName]) {
+      foundErrors.push(createFileDiagnostic(
+        packageJSONPath,
+        'Package named "' + subpackageName + '" was found in ' + packageName +
+          '\'s node_module directory, but ' + packageName + ' doesn\'t depend on ' + subpackageName +
+          ': \n\n' +
+          '  1. Either edit ' + packageJSONPath + ' to include ' +
+          subpackageName + ' as a dependency.\n'  +
+          '  2. Or remove/unlink the package named ' + subpackageName +
+          ' inside ' + path.join(realPath, 'node_modules') + ' .'
+      ));
+    }
   }
-  return foundErrors.length !== 0;
+
+  // package.json lists it as a "dependency"
+  for (var commonMLDependencyName in packageJSON.dependencies) {
+    // Yet the CommonML dependency analyzer did not pick it up as a dependency.
+    if (commonMLDependencyName !== 'CommonML' && subpackageNames.indexOf(commonMLDependencyName) === -1) {
+      // This could be because it either doesn't exist, or it exists but is not a CommonML dependency.
+      var exists = directoryExistsSync(path.join(path.join(realPath, 'node_modules'), commonMLDependencyName));
+      var isNotACommonMLDependency = !exists;
+      if (isNotACommonMLDependency) {
+        foundErrors.push(createFileDiagnostic(
+          packageJSONPath,
+          packageName + ' depends on ' + commonMLDependencyName + ' but ' + commonMLDependencyName +
+          ' isn\'t installed in '+ path.join(realPath, 'node_modules') + ':\n\n' +
+          '  1. Either run npm install (or npm link ' + commonMLDependencyName + ') from within ' + realPath + '.\n' +
+          '  2. Or remove ' + commonMLDependencyName + ' as a dependency of ' + packageName + ' by editing ' + packageJSONPath
+        ));
+      }
+    }
+  }
+  return foundErrors;
 };
 
 var generateDotMerlinForPackage = function(resourceCache, autogenAliases, moduleArtifacts, rootPackageName, packageName ) {
@@ -1225,7 +1337,8 @@ function getSubprojectPackageDescriptors(nodeModulesDir) {
       var packageJSON = getPackageJSONForPackage(realPath);
       if (packageJSON) {
         var nameField = packageJSON.name;
-        if (packageJSON.CommonML && packageName !== 'CommonML') {
+        if ((packageJSON.CommonML  || packageJSON.commonml || packageJSON.commonML || packageJSON.CommonMl) &&
+            packageName !== 'CommonML') {
           if (!nameField) {
             throw new Error("Cannot find `name` field in package.json for " +  fullPath);
           }
@@ -1247,40 +1360,47 @@ function getSubprojectPackageDescriptors(nodeModulesDir) {
 function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir) {
   var packageJSON = getPackageJSONForPackage(absRootDir);
   var rootPackageName = packageJSON.name;
-  var foundInvalidPackage = false;
-  currentlyVisitingByPackageName[rootPackageName] = true;
-  var subprojectDir = path.join(absRootDir, 'node_modules');
-  var subdescriptors = getSubprojectPackageDescriptors(subprojectDir);
-  var subpackageNames = [];
-  for (var subpackageName in subdescriptors) {
-    var subdescriptor = subdescriptors[subpackageName];
-    if (!resourceCache[subpackageName]) {
-      if (currentlyVisitingByPackageName[subpackageName]) {
-        var msg = (
-          'Circular dependency was detected from package ' +
-            rootPackageName + ' (' + absRootDir + ')' +
-            subdescriptor.realPath + ' to ' + absRootDir
-        );
-        logError(msg);
-        throw new Error(msg);
+  var foundPackageInvalidations = [];
+  var foundPackageJSONInvalidations = verifyPackageJSONFile(rootPackageName, absRootDir, packageJSON);
+  if (foundPackageJSONInvalidations.length !== 0) {
+    return foundPackageJSONInvalidations;
+  } else {
+    currentlyVisitingByPackageName[rootPackageName] = true;
+    var subprojectDir = path.join(absRootDir, 'node_modules');
+    var subdescriptors = getSubprojectPackageDescriptors(subprojectDir);
+    var subpackageNames = [];
+    for (var subpackageName in subdescriptors) {
+      var subdescriptor = subdescriptors[subpackageName];
+      if (!resourceCache[subpackageName]) {
+        if (currentlyVisitingByPackageName[subpackageName]) {
+          var msg = (
+            'Circular dependency was detected from package ' +
+              rootPackageName + ' (' + absRootDir + ')' +
+              subdescriptor.realPath + ' to ' + absRootDir
+          );
+          // Don't recurse because inifinity
+          foundPackageInvalidations = foundPackageInvalidations.concat([createFileDiagnostic(absRootDir, msg)]);
+        } else {
+          foundPackageInvalidations =
+            foundPackageInvalidations.concat(
+              recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, subdescriptor.realPath)
+            );
+        }
       }
-      foundInvalidPackage =
-        foundInvalidPackage ||
-        recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, subdescriptor.realPath);
+      subpackageNames.push(subpackageName);
     }
-    subpackageNames.push(subpackageName);
+    resourceCache[rootPackageName] = {
+      packageName: rootPackageName,
+      packageResources: getPackageResourcesForRoot(absRootDir),
+      realPath: absRootDir,
+      packageJSON: packageJSON,
+      subpackageNames: subpackageNames
+    };
+    var thisPackageInvalidations = verifyPackageConfig(resourceCache[rootPackageName], resourceCache);
+    foundPackageInvalidations = thisPackageInvalidations.length ? foundPackageInvalidations.concat(thisPackageInvalidations) : foundPackageInvalidations;
+    currentlyVisitingByPackageName[subpackageName] = false;
+    return foundPackageInvalidations;
   }
-  resourceCache[rootPackageName] = {
-    packageName: rootPackageName,
-    packageResources: getPackageResourcesForRoot(absRootDir),
-    realPath: absRootDir,
-    packageJSON: packageJSON,
-    subpackageNames: subpackageNames
-  };
-  var thisPackageInvalid = verifyPackageConfig(resourceCache[rootPackageName], resourceCache);
-  foundInvalidPackage = foundInvalidPackage || thisPackageInvalid;
-  currentlyVisitingByPackageName[subpackageName] = false;
-  return foundInvalidPackage;
 }
 
 /**
@@ -1288,10 +1408,10 @@ function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageNam
  */
 function recordPackageResourceCacheAndValidate(resourceCache, absRootDir) {
   var currentlyVisitingByPackageName = {};
-  var foundInvalidPackage =
+  var foundPackageInvalidations =
     recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir);
   var packageJSON = getPackageJSONForPackage(absRootDir);
-  return {foundInvalidPackage: foundInvalidPackage, rootPackageName: packageJSON.name};
+  return {foundPackageInvalidations: foundPackageInvalidations, rootPackageName: packageJSON.name};
 };
 
 
@@ -2029,6 +2149,10 @@ var getBuildConfigMightChangeCompilation = function(buildConfig, prevBuildConfig
 function buildTree() {
   var resourceCachePath =
     path.join(CWD, actualBuildDir(buildConfig), '__resourceCache.json');
+  var packageErrorsPath =
+    path.join(CWD, actualBuildDir(buildConfig), '__packageErrors.json');
+  var compilerErrorsPath =
+    path.join(CWD, actualBuildDir(buildConfig), '__compilerErrors.json');
   var lexResultsCachePath =
     path.join(CWD, actualBuildDir(buildConfig), '__lexResultsCache.json');
   var buildPackagesResultsCachePath =
@@ -2088,8 +2212,11 @@ function buildTree() {
   var resourceCache = {};
   var recordResult = recordPackageResourceCacheAndValidate(resourceCache, CWD);
   var rootPackageName = recordResult.rootPackageName;
-  if (recordResult.foundInvalidPackage) {
-    logError('Some package is invalid. Fix reported errors.');
+  if (recordResult.foundPackageInvalidations.length) {
+    logError(errorFormatter(recordResult.foundPackageInvalidations));
+    log();
+    log('Writing Package Errors: ' + packageErrorsPath);
+    fs.writeFileSync(packageErrorsPath, JSON.stringify(recordResult.foundPackageInvalidations));
     return;
   }
 
@@ -2261,10 +2388,13 @@ function buildTree() {
          * to not produce artifacts in the source directories.
          */
         resourceCache = {};
-        recordPackageResourceCacheAndValidate(resourceCache, CWD);
+        var recordResult = recordPackageResourceCacheAndValidate(resourceCache, CWD);
         var rootPackageName = recordResult.rootPackageName;
-        if (recordResult.foundInvalidPackage) {
-          logError('Some package is invalid. Fix reported errors.');
+        if (recordResult.foundPackageInvalidations.length) {
+          logError(errorFormatter(recordResult.foundPackageInvalidations));
+          log();
+          log('Writing Package Errors: ' + packageErrorsPath);
+          fs.writeFileSync(packageErrorsPath, JSON.stringify(recordResult.foundPackageInvalidations));
           return;
         }
         continueToBuild();
@@ -2291,7 +2421,7 @@ var whenVerifiedPath = function() {
     } catch (e) {
       logError('Some packages failed verification');
       logErrorException(e);
-      }
+    }
   } catch (e) {
     logError('Failure scanning files');
     logErrorException(e);
