@@ -1,4 +1,4 @@
-var FILE_REGEX = /(\/[^\s]*\.(\w*))\",[\s]*line[\s]*(\d*),[\s]*character[s]*[\s]*(\d*)-(\d*)([\s\S]*)/;
+var FILE_REGEX = /(\/[^\s]*\.(\w*))\",[\s]*line[\s]*(\d*)(,[\s]*character[s]*[\s]*(\d*)-(\d*))?([\s\S]*)/;
 
 var NOT_COMPATIBLE_RE = /is not compatible with type/;
 var TypeErrors = [
@@ -33,6 +33,22 @@ var TypeErrors = [
           fieldName: fieldName,
           belongToType: belongToType,
           hint: hint
+        };
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "BuildErrors.InconsistentAssumptions",
+    extract: function(content) {
+      // Sometimes they don't.
+      var fieldMatch = content.match(/Error: The files\s*(\S*)\s*and\s*(\S*)\s*make inconsistent assumptions over interface\s*(\S*)/);
+      if (fieldMatch) {
+        return {
+          conflictOne: fieldMatch[1],
+          conflictTwo: fieldMatch[2],
+          moduleName: fieldMatch[3]
         };
       } else {
         return null;
@@ -131,8 +147,8 @@ exports.extractFromStdErr = function(originatingCommands, stdErrorOutput) {
     var file = fileAndLineErrorMatch[1];
     var fileText = require('fs').readFileSync(file).toString();
     var line = +fileAndLineErrorMatch[3];
-    var characterStart = +fileAndLineErrorMatch[4];
-    var characterEnd = fileAndLineErrorMatch.length > 5 ? +fileAndLineErrorMatch[5] : null;
+    var characterStart = fileAndLineErrorMatch[5] != null ? +fileAndLineErrorMatch[5] : 0;
+    var characterEnd = fileAndLineErrorMatch[6] != null ? +fileAndLineErrorMatch[6] : 0;
     var foundMatch = false;
     for (var i = 0; i < TypeErrors.length && !foundMatch; i++) {
       var match = TypeErrors[i].extract(stdErrorOutput);
