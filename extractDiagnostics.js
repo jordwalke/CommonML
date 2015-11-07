@@ -1,4 +1,28 @@
-var FILE_REGEX = /(\/[^\s]*\.(\w*))\",[\s]*line[\s]*(\d*)(,[\s]*character[s]*[\s]*(\d*)-(\d*))?([\s\S]*)/;
+var ONE_FILE_MSG = /(\/[^\s]*\.(\w*))\",[\s]*line[\s]*(\d*)(,[\s]*character[s]*[\s]*(\d*)-(\d*))?([\s\S]*)/;
+var AT_LEAST_ONE_MSG = /\b(File \"([\s\S]*))/;
+
+
+var ERROR = 'ERROR';
+var WARNING = 'WARNING';
+
+/**
+ *
+ * In general, you'll see a series of File x (Warning|Error).
+ * So we search for anything that looks like the first [File "], and then split on the word "File ".
+ *
+ *  File "path.ml", line 477, characters 78-103:
+ *  Warning 20: this argument will not be used by the function.
+ *  File "path.ml", line 477, characters 104-108:
+ *  Warning 20: this argument will not be used by the function.
+ *  File "path.ml", line 477, characters 109-114:
+ *  Warning 20: this argument will not be used by the function.
+ *  File "path.ml", line 480, characters 16-67:
+ *  Error: This function has type
+ *           ('a) thing *
+ *           someType ->
+ *           int
+ *         It is applied to too many arguments; maybe you forgot a `;'.
+ */
 
 var NOT_COMPATIBLE_RE = /is not compatible with type/;
 var TypeErrors = [
@@ -10,7 +34,22 @@ var TypeErrors = [
       var fieldMatch = content.match(regexField);
       if (fieldMatch) {
         var fieldName = fieldMatch[1];
-        return { fieldName: fieldName };
+        return {type: ERROR, details: {fieldName: fieldName }};
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "TypeErrors.AppliedTooMany",
+    extract: function(content) {
+      var regexField =
+        /Error: This function has type\s*([\s\S]*)\s*It is applied to too many arguments; maybe you forgot a `;'/;
+      // Sometimes they don't.
+      var match = content.match(regexField);
+      if (match) {
+        var type = match[1];
+        return {type: ERROR, details: {functionType: type}};
       } else {
         return null;
       }
@@ -29,10 +68,13 @@ var TypeErrors = [
         var belongToType = match[3];
         var hint = match[4];
         return {
-          recordType: recordType,
-          fieldName: fieldName,
-          belongToType: belongToType,
-          hint: hint
+          type: ERROR,
+          details: {
+            recordType: recordType,
+            fieldName: fieldName,
+            belongToType: belongToType,
+            hint: hint
+          }
         };
       } else {
         return null;
@@ -46,10 +88,25 @@ var TypeErrors = [
       var fieldMatch = content.match(/Error: The files\s*(\S*)\s*and\s*(\S*)\s*make inconsistent assumptions over interface\s*(\S*)/);
       if (fieldMatch) {
         return {
-          conflictOne: fieldMatch[1],
-          conflictTwo: fieldMatch[2],
-          moduleName: fieldMatch[3]
+          type: ERROR,
+          details: {
+            conflictOne: fieldMatch[1],
+            conflictTwo: fieldMatch[2],
+            moduleName: fieldMatch[3]
+          }
         };
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "Warnings.CatchAll",
+    extract: function(content) {
+      var regex = /Warning (\d+):([\s\S]*)/;
+      var matches = content.match(regex);
+      if (matches) {
+        return {type: WARNING, details: {warningFlag: +matches[1], warningMessage: matches[2].trim()}};
       } else {
         return null;
       }
@@ -63,7 +120,7 @@ var TypeErrors = [
       var fieldMatch = content.match(regexField);
       if (fieldMatch) {
         var fieldName = fieldMatch[1];
-        return { fieldName: fieldName };
+        return {type: ERROR, details: {fieldName: fieldName}};
       } else {
         return null;
       }
@@ -106,15 +163,21 @@ var TypeErrors = [
           conflictPairs.push({inferred: conflicts[i], expected:conflicts[i]});
         }
         return {
-          inferred: elaborateMatch[1],
-          expected: elaborateMatch[3],
-          conflicts: conflictPairs,
+          type: ERROR,
+          details: {
+            inferred: elaborateMatch[1],
+            expected: elaborateMatch[3],
+            conflicts: conflictPairs,
+          }
         };
       } else if (noElaborateMatch) {
         return {
-          inferred: noElaborateMatch[1],
-          expected: noElaborateMatch[3],
-          conflicts: []
+          type: ERROR,
+          details: {
+            inferred: noElaborateMatch[1],
+            expected: noElaborateMatch[3],
+            conflicts: []
+          }
         };
       } else {
         return null;
@@ -131,7 +194,7 @@ var TypeErrors = [
       var match = content.match(r);
       if (match) {
         var msg = match[1];
-        return { msg: msg };
+        return {type: ERROR, details: {msg: msg}};
       } else {
         return null;
       }
@@ -141,7 +204,25 @@ var TypeErrors = [
 
 exports.extractFromStdErr = function(originatingCommands, stdErrorOutput) {
   // your code here
-  var fileAndLineErrorMatch = stdErrorOutput.match(FILE_REGEX);
+  var fileAndLineErrorMatch = stdErrorOutput.match(AT_LEAST_ONE_MSG);
+  if (fileAndLineErrorMatch) {
+    var matched = fileAndLineErrorMatch[1];
+    var eachItem = matched.split(/\bFile \"/);
+    var errors = [];
+    eachItem.forEach(function(str) {
+      if (str) {
+        errors = errors.concat(exports.extractFromStdErrOne(originatingCommands, str));
+      }
+    });
+    return errors;
+  } else {
+    return [];
+  }
+};
+
+exports.extractFromStdErrOne = function(originatingCommands, stdErrorOutput) {
+  // your code here
+  var fileAndLineErrorMatch = stdErrorOutput.match(ONE_FILE_MSG);
   var errors = [];
   if (fileAndLineErrorMatch) {
     var file = fileAndLineErrorMatch[1];
@@ -156,7 +237,7 @@ exports.extractFromStdErr = function(originatingCommands, stdErrorOutput) {
         errors.push({
           scope: 'file',
           providerName: 'CommonML',
-          type: 'ERROR',
+          type: match.type,
           filePath: file,
           text: stdErrorOutput,
           range: [[line, characterStart], [line, characterEnd]],
@@ -166,7 +247,7 @@ exports.extractFromStdErr = function(originatingCommands, stdErrorOutput) {
             originalStdErr: stdErrorOutput,
             originatingCommands: originatingCommands,
             kind: TypeErrors[i].kind,
-            details: match
+            details: match.details
           }
         });
         foundMatch = true;
@@ -176,7 +257,7 @@ exports.extractFromStdErr = function(originatingCommands, stdErrorOutput) {
       errors.push({
         scope: 'file',
         providerName: 'CommonML',
-        type: 'ERROR',
+        type: ERROR,
         filePath: file,
         text: stdErrorOutput, // Just use the giant stderr if no pretty match
         range: [[line, characterStart], [line, characterEnd]],
@@ -185,7 +266,7 @@ exports.extractFromStdErr = function(originatingCommands, stdErrorOutput) {
           fileText: fileText,
           originalStdErr: stdErrorOutput,
           originatingCommands: originatingCommands,
-          kind: 'UNKNOWN',
+          kind: 'File.Unknown',
           details: {}
         }
       });
@@ -194,13 +275,12 @@ exports.extractFromStdErr = function(originatingCommands, stdErrorOutput) {
     errors.push({
      scope: 'project',
      providerName: 'CommonML',
-     type: 'ERROR',
+     type: ERROR,
      text: stdErrorOutput,
      commonMLData: {
        kind: "Project.Unknown",
        originalStdErr: stdErrorOutput,
        originatingCommands: originatingCommands,
-       kind: 'UNKNOWN',
        details: {}
      }
     });
