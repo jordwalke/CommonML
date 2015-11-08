@@ -133,6 +133,8 @@ var actualBuildDirForDocs = function(buildConfig) {
 };
 
 var buildConfig = {
+  minVersion: argv.minVersion,
+  opt: argv.opt || 1,
   yacc: argv.yacc === 'true',
   compiler: argv.compiler || 'byte',
   concurrency: argv.concurrency || 4,
@@ -144,6 +146,10 @@ var buildConfig = {
   rebuggerPath: argv.rebuggerPath || null,
   errorFormatter: argv.errorFormatter || 'default'
 };
+
+if (buildConfig.minVersion) {
+  require('./version').ensureAtLeast(buildConfig.minVersion);
+}
 
 var defaultErrorFormatter = function(diagnostics) {
   return diagnostics.map(renderFileDiagnostic).join('\n\n');
@@ -1622,8 +1628,9 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
   var changeDir = shouldCompileExecutableIntoJS && ['cd', jsBuildDir ].join(' ');
   var buildJSArtifactCommand = shouldCompileExecutableIntoJS && [
     'js_of_ocaml',
+    buildConfig.opt !== 1 ? '--opt ' + buildConfig.opt  : '',
     '--source-map',
-    '--no-inline',
+    buildConfig.opt !== 3 ? '--no-inline' : '',
     '--debug-info',
     '--pretty',
     '--linkall',
@@ -2152,6 +2159,7 @@ var getCommonMLChanged = function(packageResource, lastSuccessfulPackageResource
 
 var getBuildConfigMightChangeCompilation = function(buildConfig, prevBuildConfig) {
   return !prevBuildConfig ||
+    prevBuildConfig.opt !== buildConfig.opt ||
     prevBuildConfig.yacc !== buildConfig.yacc ||
     prevBuildConfig.compiler !== buildConfig.compiler ||
     prevBuildConfig.forDebug !== buildConfig.forDebug;
