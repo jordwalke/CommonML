@@ -1,0 +1,55 @@
+Various Error forms observed:
+
+In general, you'll see a series of File x (Warning|Error).
+So we search for anything that looks like the first [File "], and then split on the word "File ".
+------------------------------------------------------------------------------------------------
+
+ File "path.ml", line 477, characters 78-103:
+ Warning 20: this argument will not be used by the function.
+ File "path.ml", line 477, characters 104-108:
+ Warning 20: this argument will not be used by the function.
+ File "path.ml", line 477, characters 109-114:
+ Warning 20: this argument will not be used by the function.
+ File "path.ml", line 480, characters 16-67:
+ Error: This function has type
+          ('a) thing *
+          someType ->
+          int
+        It is applied to too many arguments; maybe you forgot a `;'.
+
+
+
+
+Error: This expression has type 'a * 'b
+       but an expression was expected of type
+         (p#7, d#7, 'c) myType =
+           MyModule.t ->
+           (p#7, d#7, 'c) instance ->
+           M_SomeModule__Path.myTypeta ->
+           (p#7, d#7, 'c) instance * blahType
+
+
+
+Error: Unbound module ABC.XYZ
+
+Error: Unbound module ABC
+
+
+Error: This expression has type arg#0 but an expression was expected of type
+         arg#0
+       The type constructor arg#0 would escape its scope
+
+Error: This record expression is expected to have type
+         (MyModule.t, 'a opaqueGraph, 'a opaqueGraph)
+         dispatch prefixTrie
+       The constructor true does not belong to type Prelude.Core.dispatch
+
+
+Error: This pattern matches values of type 'a * 'b
+       but a pattern was expected which matches values of type
+         ('c, 'd, arg#0, 'e) Prelude.Core.delegate =
+           ('c, 'd, arg#0, 'e) M_Prelude__Core.delegate
+
+
+  
+

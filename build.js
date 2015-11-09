@@ -144,7 +144,11 @@ var buildConfig = {
   jsCompile: argv.jsCompile === 'true',
   // The path to graphical debugger (coming soon).
   rebuggerPath: argv.rebuggerPath || null,
-  errorFormatter: argv.errorFormatter || 'default'
+  errorFormatter: argv.errorFormatter || 'default',
+  // Whether or not to log futile attempts at extracting meaningful error
+  // information.
+  // This provides feedback about which errors are the most common.
+  logUnextractedErrors: argv.logUnextractedErrors === 'true'
 };
 
 if (buildConfig.minVersion) {
@@ -168,7 +172,8 @@ var notEmptyString = function(s) {
   return s !== '';
 };
 invariant(
-  !('forDebug' in argv) || argv.forDebug === 'true' || argv.forDebug === 'false'
+  !('forDebug' in argv) || argv.forDebug === 'true' || argv.forDebug === 'false',
+  'You Must supply a value to --forDebug - either true or false.'
 );
 invariant(
   buildConfig.forDebug || !buildConfig.jsCompile,
@@ -305,14 +310,12 @@ var drawBuildGraph =  function(resourceCache, resultsCache, rootPackageName) {
   var tree = [executableTitle, getBuildGraph({}, resourceCache, resultsCache, rootPackageName)];
   var buildTreeLines = [
     "",
-    clc.yellow("Build Graph:"),
-    "⋯ = Uninteresting nodes - already shown elsewhere, no build operations.",
-    "☑ = Rebuild Success",
-    "☒ = Rebuild Failed",
-    "☐ = Rebuild Blocked",
+    "",
+    clc.bold("Build Graph:"),
     "",
     asciitree(tree),
     "",
+    "☑ Rebuild Success ☒ Rebuild Failed ☐ Rebuild Blocked ⋯ Uninteresting",
     ""
   ];
   var buildTreeText = buildTreeLines.join('\n');
@@ -2255,8 +2258,8 @@ function buildTree() {
     fs.writeFileSync(buildExecutableResultsCachePath, JSON.stringify(buildExecutableResultsCache));
     fs.writeFileSync(lexResultsCachePath, JSON.stringify(lexResultsCache));
 
-    var compileDiagnostics = extractDiagnostics.fromStdErrForAllPackages(buildPackagesResultsCache);
-    var linkDiagnostics = extractDiagnostics.fromStdErrForAllPackages(buildExecutableResultsCache);
+    var compileDiagnostics = extractDiagnostics.fromStdErrForAllPackages(buildPackagesResultsCache, buildConfig.logUnextractedErrors);
+    var linkDiagnostics = extractDiagnostics.fromStdErrForAllPackages(buildExecutableResultsCache, buildConfig.logUnextractedErrors);
     fs.writeFileSync(compileDiagnosticsPath, JSON.stringify(compileDiagnostics));
     fs.writeFileSync(linkDiagnosticsPath, JSON.stringify(linkDiagnostics));
 
@@ -2266,9 +2269,9 @@ function buildTree() {
     drawBuildGraph(resourceCache, buildPackagesResultsCache, rootPackageName);
 
     if (!successful) {
-      logError('Build Failure: Fix errors and try again');
+      logError(clc.bold('Build Failure: Fix errors and try again'));
     } else {
-      logProgress('Build Complete: Sucess!');
+      logProgress(clc.bold('Build Complete: Sucess!'));
     }
   };
 

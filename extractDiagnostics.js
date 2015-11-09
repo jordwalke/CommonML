@@ -1,40 +1,208 @@
+var path = require('path');
+var fs = require('fs');
 var ONE_FILE_MSG = /(\/[^\s]*\.(\w*))\",[\s]*line[\s]*(\d*)(,[\s]*character[s]*[\s]*(\d*)-(\d*))?([\s\S]*)/;
-var AT_LEAST_ONE_MSG = /\b(File \"([\s\S]*))/;
+
+/**
+ * Need to be careful. Errors are separated by File: "file/path", but some
+ * errors will include a secondary reference file that is *indented* such as
+ *
+ *    |
+ *    |
+ *    |File: "file/path" characters blah blah
+ *    |   Some error description. Here's another file for reference that should
+ *    |   be considered part of the same file:
+ *    |   File: "another/file/path" characters blah blah
+ *    |
+ *    |
+ */
+var AT_LEAST_ONE_MSG = /(^File \"([\s\S]*))/m;
 
 
 var ERROR = 'ERROR';
 var WARNING = 'WARNING';
 
-/**
- *
- * In general, you'll see a series of File x (Warning|Error).
- * So we search for anything that looks like the first [File "], and then split on the word "File ".
- *
- *  File "path.ml", line 477, characters 78-103:
- *  Warning 20: this argument will not be used by the function.
- *  File "path.ml", line 477, characters 104-108:
- *  Warning 20: this argument will not be used by the function.
- *  File "path.ml", line 477, characters 109-114:
- *  Warning 20: this argument will not be used by the function.
- *  File "path.ml", line 480, characters 16-67:
- *  Error: This function has type
- *           ('a) thing *
- *           someType ->
- *           int
- *         It is applied to too many arguments; maybe you forgot a `;'.
- */
-
 var NOT_COMPATIBLE_RE = /is not compatible with type/;
-var TypeErrors = [
+// This error should be filtered because the more meaningful syntax error will
+// already be reported.
+var IGNORE_PREPROCESSOR_ERR = /Error: Error while running external preprocessor[\s\S]*/;
+
+/**
+ * Perhaps this should be applied everywhere we see a type.
+ */
+var splitEquivalentTypes = function(typeStr) {
+  return typeStr.split(/=/).filter(function(typ) {
+    return typ && typ.trim() !== '';
+  });
+};
+
+var getConflictPairs = function(incompatText) {
+  var splitByIsNotCompatibleWith = incompatText &&
+    incompatText.match(/is not compatible with type/) &&
+    incompatText.split(/is not compatible with type/);
+  var conflicts = [];
+  var splitByType = splitByIsNotCompatibleWith && splitByIsNotCompatibleWith.map(function(text) {
+    var splitByType = text.split(/\bType\s/);
+    splitByType && splitByType.forEach(function(byType){
+      byType && byType.trim() && conflicts.push(byType.trim());
+    });
+  });
+  if (conflicts.length % 2 !== 0) {
+    throw new Error("Conflicts don't appear in pairs");
+  }
+  var conflictPairs = [];
+  for (var i = 0; i < conflicts.length; i+=2) {
+    conflictPairs.push({
+      inferred: splitEquivalentTypes(conflicts[i]),
+      expected: splitEquivalentTypes(conflicts[i+1])
+    });
+  }
+  return conflictPairs;
+};
+var ErrorExtractors = [
+  {
+    kind: "TypeErrors.MismatchTypeArguments",
+    extract: function(content) {
+      var regex = /Error: The type constructor\s*([\w\.]*)\s*expects[\s]*(\d+)\s*argument\(s\),\s*but is here applied to\s*(\d+)\s*argument\(s\)/;
+      // Sometimes they don't.
+      var match = content.match(regex);
+      if (match) {
+        var typeConstructor = match[1];
+        return {
+          type: ERROR,
+          details: {
+            typeConstructor: typeConstructor,
+            expectedCount: match[2],
+            observedCount: match[3]
+          }
+        };
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "TypeErrors.UnboundValue",
+    extract: function(content) {
+      var regexField = /Error: Unbound value ([\w\.]*)[\s\S](Hint:([\s\S]*))?/;
+      // Sometimes they don't.
+      var moduleMatch = content.match(regexField);
+      if (moduleMatch) {
+        var expression = moduleMatch[1];
+        var hint = moduleMatch[3] && moduleMatch[3].trim();
+        return {type: ERROR, details: {expression: expression, hint: hint}};
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "TypeErrors.SignatureMismatch",
+    extract: function(content) {
+      var regexField = /Error: Signature mismatch:[\s\S]*Values do not match:([\s\S]*)is not included in([\s\S]*)File "([\s\S]*)/;
+      // Sometimes they don't.
+      var match = content.match(regexField);
+      if (match) {
+        var inferredValueType = match[1];
+        var expectedValueType = match[2];
+        var fileAndLineErrorContents = match[3];
+        var actualDeclaractionFileAndLineErrorMatch =
+          fileAndLineErrorContents.match(ONE_FILE_MSG)
+        if (!actualDeclaractionFileAndLineErrorMatch) {
+          // Don't know what this form means.
+          return null;
+        }
+        var declarationFileInfo = extractFileInfoFromError(actualDeclaractionFileAndLineErrorMatch);
+        return {
+          type: ERROR,
+          details: {
+            inferredValueType: inferredValueType,
+            expectedValueType: expectedValueType,
+            declarationLocation: {
+              filePath: declarationFileInfo.filePath,
+              fileText: declarationFileInfo.fileText,
+              range: [[declarationFileInfo.line, declarationFileInfo.characterStart], [declarationFileInfo.line, declarationFileInfo.characterEnd]],
+            }
+          }
+        };
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "TypeErrors.SignatureItemMissing",
+    extract: function(content) {
+      var regexField =
+        /Error: Signature mismatch:[\s\S]*?(The[\s\S]*is required but not provided[\s\S*])/;
+      // Sometimes they don't.
+      var match = content.match(regexField);
+      if (match) {
+        return {
+          type: ERROR,
+          details: {
+            missingItems: match[1].split('\n').filter(function(s) {return !!s;})
+          }
+        };
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "TypeErrors.UnboundModule",
+    extract: function(content) {
+      var regexField = /Error: Unbound module ([\w\.]*)[\s\S](Hint:([\s\S]*))?/;
+      // Sometimes they don't.
+      var match = content.match(regexField);
+      if (match) {
+        var moduleName = match[1];
+        var hint = match[3] && match[3].trim();
+        return {type: ERROR, details: {moduleName: moduleName, hint: hint}};
+      } else {
+        return null;
+      }
+    }
+  },
   {
     kind: "TypeErrors.UnboundRecordField",
     extract: function(content) {
-      var regexField = /Error: Unbound record field (\w*)/
+      var regexField = /Error: Unbound record field (\w*)[\s\S](Hint:([\s\S]*))?/
       // Sometimes they don't.
-      var fieldMatch = content.match(regexField);
-      if (fieldMatch) {
-        var fieldName = fieldMatch[1];
-        return {type: ERROR, details: {fieldName: fieldName }};
+      var match = content.match(regexField);
+      if (match) {
+        var fieldName = match[1];
+        var hint = match[3] && match[3].trim();
+        return {type: ERROR, details: {fieldName: fieldName, hint:hint}};
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "TypeErrors.UnboundConstructor",
+    extract: function(content) {
+      var regexField = /Error: Unbound constructor ([\w\.]*)[\s\S](Hint:([\s\S]*))?/
+      // Sometimes they don't.
+      var match = content.match(regexField);
+      if (match) {
+        var namespacedConstructor = match[1];
+        var hint = match[3] && match[3].trim();
+        return {type: ERROR, details: {namespacedConstructor: namespacedConstructor, hint:hint}};
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "TypeErrors.UnboundTypeConstructor",
+    extract: function(content) {
+      var regexField = /Error: Unbound type constructor ([\w\.]*)[\s\S](Hint:([\s\S]*))?/
+      // Sometimes they don't.
+      var match = content.match(regexField);
+      if (match) {
+        var namespacedConstructor = match[1];
+        var hint = match[3] && match[3].trim();
+        return {type: ERROR, details: {namespacedConstructor: namespacedConstructor, hint:hint}};
       } else {
         return null;
       }
@@ -56,24 +224,67 @@ var TypeErrors = [
     }
   },
   {
+    kind: "TypeErrors.RecordFieldNotInExpression",
+    extract: function(content) {
+      var regexField =
+        /This expression has type([\s\S]*)The field\s*(\w*)[\s\S]*does not belong to type\s*([\s\S]*)/
+      // Sometimes they don't.
+      var match = content.match(regexField);
+      if (match) {
+        var expressionType = match[1];
+        var fieldName = match[2];
+        var belongToTypeAndHint = match[3].split('Hint:');
+        return {
+          type: ERROR,
+          details: {
+            expressionType: expressionType,
+            fieldName: fieldName,
+            belongToType: belongToTypeAndHint[0],
+            hint: belongToTypeAndHint[1]
+          }
+        };
+      } else {
+        return null;
+      }
+    }
+  },
+  {
     kind: "TypeErrors.RecordFieldError",
     extract: function(content) {
       var regexField =
-        /This record expression is expected to have type([\s\S]*)The field\s*(\w*)[\s\S]*does not belong to type\s*([\s\S]*)(Hint:[\s\S]*)/
+        /This record expression is expected to have type([\s\S]*)The (field|constructor)\s*(\S*)\s*does not belong to type\s*([\s\S]*)/
       // Sometimes they don't.
       var match = content.match(regexField);
       if (match) {
         var recordType = match[1];
-        var fieldName = match[2];
-        var belongToType = match[3];
-        var hint = match[4];
+        var fieldName = match[3];
+        var hint = match[5];
+        var belongToTypeAndHint = match[4].split('Hint:');
         return {
           type: ERROR,
           details: {
+            fieldOrConstructor: match[2],
             recordType: recordType,
             fieldName: fieldName,
-            belongToType: belongToType,
-            hint: hint
+            belongToType: belongToTypeAndHint[0],
+            hint: belongToTypeAndHint[1] || null
+          }
+        };
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "FileErrors.SyntaxError",
+    extract: function(content) {
+      // Sometimes they don't.
+      var fieldMatch = content.match(/Error: Syntax error[:]*([\s\S]*)/);
+      if (fieldMatch) {
+        return {
+          type: ERROR,
+          details: {
+            hint: fieldMatch[1]
           }
         };
       } else {
@@ -106,6 +317,7 @@ var TypeErrors = [
       var regex = /Warning (\d+):([\s\S]*)/;
       var matches = content.match(regex);
       if (matches) {
+        doLogUnextractedError(content);
         return {type: WARNING, details: {warningFlag: +matches[1], warningMessage: matches[2].trim()}};
       } else {
         return null;
@@ -129,54 +341,54 @@ var TypeErrors = [
   {
     kind: "TypeErrors.IncompatibleType",
     extract: function(content) {
-      //Error: .......
-      //    ...............
-      //
-      // Not part of error  (newline followed by not much space)
-
+      // Using non-"greedy" regexes messes up the regex! We need to use,
+      // standard greedy with (pat | $) *not* in multiline mode.
       // Sometimes the type errors have elaboration (Type x is not compatible with y)
-      var regexElaboration =
-         /Error: This expression has type((\n|.)*)but an expression was expected of type((\n|.)*?)\n\s*Type\b(.*([\n|\r]\s\s\s.*)*)/m;
-      // Sometimes they don't.
-      var regexForNoElaboration =
-         /Error: This expression has type((\n|.)*)but an expression was expected of type((\n|.)*)/m;
-
-      var elaborateMatch = content.match(regexElaboration);
-      var noElaborateMatch = content.match(regexForNoElaboration);
-      if (elaborateMatch) {
-        var conflictText = elaborateMatch[5];
-        var splitByIsNotCompatibleWith = conflictText &&
-          conflictText.match(/is not compatible with type/) &&
-          conflictText.split(/is not compatible with type/);
-        var conflicts = [];
-        var splitByType = splitByIsNotCompatibleWith && splitByIsNotCompatibleWith.map(function(text) {
-          var splitByType = text.split(/\bType\s/);
-          splitByType && splitByType.forEach(function(byType){
-            byType && byType.trim() && conflicts.push(byType.trim());
-          });
-        });
-        if (conflicts.length % 2 !== 0) {
-          throw new Error("Conflicts don't appear in pairs");
-        }
-        var conflictPairs = [];
-        for (var i = 0; i < conflicts.length; i+=2) {
-          conflictPairs.push({inferred: conflicts[i], expected:conflicts[i]});
-        }
+      var inferredIndex = 1;
+      var expectedIndex = 2;
+      var incompatIndex = 4;
+      var escapeScopeIndex = 6;
+      var incompatPatRegex =
+        /Error: This pattern matches values of type([\s\S]*?)but a pattern was expected which matches values of type([\s\S]*?)(Type\b([\s\S]*?)|$)?((The type constructor[\s\S]*?)|$)?((The type variable[\s\S]*)|$)/;
+      var incompatExprRegex =
+        // Very nuanced regex.
+        /Error: This expression has type([\s\S]*?)but an expression was expected of type([\s\S]*?)(Type\b([\s\S]*?)|$)?((The type constructor[\s\S]*?)|$)?((The type variable[\s\S]* occurs inside ([\s\S])*)|$)/ 
+      var exprMatch = content.match(incompatExprRegex);
+      var patMatch = content.match(incompatPatRegex);
+      var match = exprMatch || patMatch;
+      if (match) {
+        var inferred = match[inferredIndex];
+        var expected = match[expectedIndex];
+        var incompatText = match[incompatIndex];
+        var conflictPairs = getConflictPairs(incompatText);
         return {
           type: ERROR,
           details: {
-            inferred: elaborateMatch[1],
-            expected: elaborateMatch[3],
+            termKind: exprMatch ? 'expression' : 'pattern',
+            inferred: inferred,
+            expected: expected,
+            inferredEquivalentTypes: splitEquivalentTypes(inferred),
+            expectedEquivalentTypes: splitEquivalentTypes(expected),
             conflicts: conflictPairs,
+            existentialMessage: match[escapeScopeIndex] && match[escapeScopeIndex].trim()
           }
         };
-      } else if (noElaborateMatch) {
+      } else {
+        return null;
+      }
+    }
+  },
+  {
+    kind: "TypeErrors.NotAFunction",
+    extract: function(content) {
+      var regex = /This expression has type([\s\S]*)This is not a function; it cannot be applied./
+      var match = content.match(regex);
+      if (match) {
+        var type = match[1];
         return {
           type: ERROR,
           details: {
-            inferred: noElaborateMatch[1],
-            expected: noElaborateMatch[3],
-            conflicts: []
+            type: type
           }
         };
       } else {
@@ -188,11 +400,12 @@ var TypeErrors = [
     // Prevents repriting the file name
     // CatchAll should remain at the bottom of the list.
     kind: "General.CatchAll",
-    extract: function(content) {
+    extract: function(stdErrorOutput) {
       var r = /Error: ([\s\S]*)/
       // Sometimes they don't.
-      var match = content.match(r);
+      var match = stdErrorOutput.match(r);
       if (match) {
+        doLogUnextractedError(stdErrorOutput);
         var msg = match[1];
         return {type: ERROR, details: {msg: msg}};
       } else {
@@ -202,16 +415,35 @@ var TypeErrors = [
   },
 ];
 
-exports.extractFromStdErr = function(originatingCommands, stdErrorOutput) {
+
+var extractFileInfoFromError = function(fileAndLineErrorMatch) {
+  if (!fileAndLineErrorMatch) {
+    throw new Error('Could not extract info from file error message');
+  }
+  var filePath = fileAndLineErrorMatch[1];
+  var fileText = require('fs').readFileSync(filePath).toString();
+  var line = +fileAndLineErrorMatch[3];
+  var characterStart = fileAndLineErrorMatch[5] != null ? +fileAndLineErrorMatch[5] : 0;
+  var characterEnd = fileAndLineErrorMatch[6] != null ? +fileAndLineErrorMatch[6] : 0;
+  return {
+    filePath: filePath,
+    fileText: fileText,
+    line: line,
+    characterStart: characterStart,
+    characterEnd: characterEnd
+  };
+};
+
+exports.extractFromStdErr = function(originatingCommands, stdErrorOutput, logUnextractedErrors) {
   // your code here
   var fileAndLineErrorMatch = stdErrorOutput.match(AT_LEAST_ONE_MSG);
   if (fileAndLineErrorMatch) {
     var matched = fileAndLineErrorMatch[1];
-    var eachItem = matched.split(/\bFile \"/);
+    var eachItem = matched.split(/^File \"/m);
     var errors = [];
     eachItem.forEach(function(str) {
       if (str) {
-        errors = errors.concat(exports.extractFromStdErrOne(originatingCommands, str));
+        errors = errors.concat(exports.extractFromStdErrOne(originatingCommands, str, logUnextractedErrors));
       }
     });
     return errors;
@@ -220,33 +452,70 @@ exports.extractFromStdErr = function(originatingCommands, stdErrorOutput) {
   }
 };
 
-exports.extractFromStdErrOne = function(originatingCommands, stdErrorOutput) {
-  // your code here
+/**
+ * Provides feedback about the most common errors that weren't beautifully
+ * formatted. We'll prioritize the top occurrences.
+ */
+var unextractedErrorLogFilePath = path.join(
+  process.cwd(),
+  'error_formatter_failed_attempts_commit_me_so_we_know_what_to_improve.txt'
+);
+
+// Helps to prevent merge conflicts.
+var unextractedErrorLogEntryPrefix = 'UNEXTRACTED_ERROR:' + process.env['USER'] + ':';
+
+var doLogUnextractedError = function(stdErrorOutput) {
+  if (!fs.existsSync(unextractedErrorLogFilePath)) {
+    fs.writeFileSync(unextractedErrorLogFilePath, '');
+  };
+  var existingContents = fs.readFileSync(unextractedErrorLogFilePath).toString();
+  var entries = existingContents.split(/UNEXTRACTED_ERROR:(\w*):/);
+  for (var i = 0; i < entries.length; i++) {
+    if (entries[i] == stdErrorOutput) {
+      return;
+    };
+  }
+  try {
+    fs.appendFile(unextractedErrorLogFilePath, unextractedErrorLogEntryPrefix + stdErrorOutput, function (err) {
+      if (err) {
+        console.error('Error extractor failed to log unextracted error: Not going to block the build, but REPORT THIS ISSUE');
+        console.error(err);
+      }
+    });
+  } catch (e) {
+    console.error('Error extractor failed to log unextracted error: Not going to block the build, but REPORT THIS ISSUE');
+    console.error(e);
+  }
+};
+
+exports.extractFromStdErrOne = function(originatingCommands, stdErrorOutput, logUnextractedErrors) {
   var fileAndLineErrorMatch = stdErrorOutput.match(ONE_FILE_MSG);
   var errors = [];
   if (fileAndLineErrorMatch) {
-    var file = fileAndLineErrorMatch[1];
-    var fileText = require('fs').readFileSync(file).toString();
-    var line = +fileAndLineErrorMatch[3];
-    var characterStart = fileAndLineErrorMatch[5] != null ? +fileAndLineErrorMatch[5] : 0;
-    var characterEnd = fileAndLineErrorMatch[6] != null ? +fileAndLineErrorMatch[6] : 0;
+    // Skip syntax preprocessor errors since they'll typically be better
+    // reported as syntax errors
+    var shouldIgnore = stdErrorOutput.match(IGNORE_PREPROCESSOR_ERR);
+    if (shouldIgnore) {
+      return [];
+    }
+    var fileInfo = extractFileInfoFromError(fileAndLineErrorMatch);
     var foundMatch = false;
-    for (var i = 0; i < TypeErrors.length && !foundMatch; i++) {
-      var match = TypeErrors[i].extract(stdErrorOutput);
+    for (var i = 0; i < ErrorExtractors.length && !foundMatch; i++) {
+      var match = ErrorExtractors[i].extract(stdErrorOutput);
       if (match) {
         errors.push({
           scope: 'file',
           providerName: 'CommonML',
           type: match.type,
-          filePath: file,
+          filePath: fileInfo.filePath,
           text: stdErrorOutput,
-          range: [[line, characterStart], [line, characterEnd]],
+          range: [[fileInfo.line, fileInfo.characterStart], [fileInfo.line, fileInfo.characterEnd]],
           commonMLData: {
             // File text at time of error
-            fileText: fileText,
+            fileText: fileInfo.fileText,
             originalStdErr: stdErrorOutput,
             originatingCommands: originatingCommands,
-            kind: TypeErrors[i].kind,
+            kind: ErrorExtractors[i].kind,
             details: match.details
           }
         });
@@ -254,16 +523,19 @@ exports.extractFromStdErrOne = function(originatingCommands, stdErrorOutput) {
       }
     }
     if (!foundMatch) {
+      if (logUnextractedErrors) {
+        doLogUnextractedError(stdErrorOutput);
+      }
       errors.push({
         scope: 'file',
         providerName: 'CommonML',
         type: ERROR,
-        filePath: file,
+        filePath: fileInfo.file,
         text: stdErrorOutput, // Just use the giant stderr if no pretty match
-        range: [[line, characterStart], [line, characterEnd]],
+        range: [[fileInfo.line, fileInfo.characterStart], [fileInfo.line, fileInfo.characterEnd]],
         commonMLData: {
           // File text at time of error
-          fileText: fileText,
+          fileText: fileInfo.fileText,
           originalStdErr: stdErrorOutput,
           originatingCommands: originatingCommands,
           kind: 'File.Unknown',
@@ -272,6 +544,7 @@ exports.extractFromStdErrOne = function(originatingCommands, stdErrorOutput) {
       });
     }
   } else {
+    doLogUnextractedError(stdErrorOutput);
     errors.push({
      scope: 'project',
      providerName: 'CommonML',
@@ -288,21 +561,25 @@ exports.extractFromStdErrOne = function(originatingCommands, stdErrorOutput) {
   return errors;
 };
 
-exports.fromStdErrForAllPackages = function(buildResults) {
+exports.fromStdErrForAllPackages = function(buildResults, logUnextractedErrors) {
   var res = [];
   for (var packageName in buildResults.versionedResultsByPackageName) {
     var packageBuildResults = buildResults.versionedResultsByPackageName[packageName].results;
     if (packageBuildResults.dependencyResults.err) {
       res = res.concat (
         exports.extractFromStdErr(
-          packageBuildResults.dependencyResults.commands, packageBuildResults.dependencyResults.err
+          packageBuildResults.dependencyResults.commands,
+          packageBuildResults.dependencyResults.err,
+          logUnextractedErrors
         )
       );
     }
     if (packageBuildResults.buildResults.err) {
       res = res.concat(
         exports.extractFromStdErr(
-          packageBuildResults.buildResults.commands, packageBuildResults.buildResults.err
+          packageBuildResults.buildResults.commands,
+          packageBuildResults.buildResults.err,
+          logUnextractedErrors
         )
       );
     }
