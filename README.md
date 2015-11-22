@@ -84,6 +84,7 @@ To make your own package just like the example:
 
     mkdir MyProject && cd MyProject
     echo '{
+      "name": "MyProject",
       "dependencies": {"CommonML": "git://github.com/jordwalke/CommonML.git"},
       "CommonML": {
         "exports": ["MyPublicModule"],
