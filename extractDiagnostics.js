@@ -1,6 +1,6 @@
 var path = require('path');
 var fs = require('fs');
-var ONE_FILE_MSG = /(\/[^\s]*\.(\w*))\",[\s]*line[\s]*(\d*)(,[\s]*character[s]*[\s]*(\d*)-(\d*))?([\s\S]*)/;
+var ONE_FILE_MSG = /([^\s"]*\.(\w*))\",[\s]*line[\s]*(\d*)(,[\s]*character[s]*[\s]*(\d*)-(\d*))?([\s\S]*)/;
 
 /**
  * Need to be careful. Errors are separated by File: "file/path", but some
@@ -317,7 +317,6 @@ var ErrorExtractors = [
       var regex = /Warning (\d+):([\s\S]*)/;
       var matches = content.match(regex);
       if (matches) {
-        doLogUnextractedError(content);
         return {type: WARNING, details: {warningFlag: +matches[1], warningMessage: matches[2].trim()}};
       } else {
         return null;
@@ -405,7 +404,6 @@ var ErrorExtractors = [
       // Sometimes they don't.
       var match = stdErrorOutput.match(r);
       if (match) {
-        doLogUnextractedError(stdErrorOutput);
         var msg = match[1];
         return {type: ERROR, details: {msg: msg}};
       } else {
@@ -443,7 +441,8 @@ exports.extractFromStdErr = function(originatingCommands, stdErrorOutput, logUne
     var errors = [];
     eachItem.forEach(function(str) {
       if (str) {
-        errors = errors.concat(exports.extractFromStdErrOne(originatingCommands, str, logUnextractedErrors));
+        var recoverStdErr = "File \"" + str;
+        errors = errors.concat(exports.extractFromStdErrOne(originatingCommands, recoverStdErr, logUnextractedErrors));
       }
     });
     return errors;
@@ -503,7 +502,7 @@ exports.extractFromStdErrOne = function(originatingCommands, stdErrorOutput, log
     for (var i = 0; i < ErrorExtractors.length && !foundMatch; i++) {
       var match = ErrorExtractors[i].extract(stdErrorOutput);
       if (match) {
-        errors.push({
+        var nextErr = {
           scope: 'file',
           providerName: 'CommonML',
           type: match.type,
@@ -518,8 +517,13 @@ exports.extractFromStdErrOne = function(originatingCommands, stdErrorOutput, log
             kind: ErrorExtractors[i].kind,
             details: match.details
           }
-        });
+        };
+        var nextKind = nextErr.commonMLData.kind;
+        if ((nextKind === 'Warnings.CatchAll' || nextKind === 'General.CatchAll') && logUnextractedErrors) {
+          doLogUnextractedError(stdErrorOutput);
+        }
         foundMatch = true;
+        errors.push(nextErr);
       }
     }
     if (!foundMatch) {
@@ -544,7 +548,9 @@ exports.extractFromStdErrOne = function(originatingCommands, stdErrorOutput, log
       });
     }
   } else {
-    doLogUnextractedError(stdErrorOutput);
+    if (logUnextractedErrors) {
+      doLogUnextractedError(stdErrorOutput);
+    }
     errors.push({
      scope: 'project',
      providerName: 'CommonML',
