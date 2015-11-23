@@ -84,6 +84,7 @@ To make your own package just like the example:
 
     mkdir MyProject && cd MyProject
     echo '{
+      "name": "MyProject",
       "dependencies": {"CommonML": "git://github.com/jordwalke/CommonML.git"},
       "CommonML": {
         "exports": ["MyPublicModule"],
@@ -149,7 +150,7 @@ Resolving Duplicate Packages:
 Duplicate modules are namespaced automatically, but duplicate packages can only be resolved
 by the package manager - `npm`.
 If two packages depend on two different versions of the same module - there is no solution yet.
-If two packages depend on *compatible* versions of the same module, then `npm dedupde` should take care of it.
+If two packages depend on *compatible* versions of the same module, then `npm dedupe` should take care of it.
 
 Build Parameters:
 -----------------
