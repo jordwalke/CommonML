@@ -995,6 +995,24 @@ var generateDotMerlinForPackage = function(resourceCache, autogenAliases, module
   });
   var flgs = ['FLG ' + filteredCompilerFlags.join(' ') + ' -open ' + autogenAliases.internalModuleName];
 
+  // Suffix extensions. Merlin should have a flag that helps :MerlinLocate commands.
+  var packageExtensions = packageConfig.packageJSON.CommonML.extensions;
+  var extensions = [];
+  if (packageExtensions) {
+    for (var i = 0; i < packageExtensions.length; i++) {
+      var extension = packageExtensions[i];
+      var impl = extension['implementation'];
+      var intf = extension['interface'];
+      var implTrimmed = impl.trim();
+      var intfTrimmed = intf.trim();
+      if (implTrimmed && intfTrimmed) {
+        extensions.push('SUFFIX ' + impl.trim() + ' ' + intf.trim());
+      } else {
+        extensions.push("# Invalid suffixes in package.json's CommonML")
+      }
+    }
+  }
+
   var depSourceDirs = [];
   for (var i = 0; i < packageConfig.subpackageNames.length; i++) {
     var subpackageName = packageConfig.subpackageNames[i];
@@ -1019,6 +1037,7 @@ var generateDotMerlinForPackage = function(resourceCache, autogenAliases, module
   .concat(buildTags)
   .concat(pkgs)
   .concat(flgs)
+  .concat(extensions)
   .join('\n');
   return dotMerlinSource;
 };
