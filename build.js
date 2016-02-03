@@ -1355,7 +1355,7 @@ function getPackageJSONForPackage(absDir) {
       );
     }
   } else {
-    throw new Error('No package.json file for package at ' + absDir);
+    logError('No package.json file for package at ' + absDir);
   }
 }
 
