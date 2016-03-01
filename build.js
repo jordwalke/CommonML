@@ -2188,6 +2188,11 @@ var getBuildConfigMightChangeCompilation = function(buildConfig, prevBuildConfig
 };
 
 function buildTree() {
+  // Might not have been created if build process failed very early.
+  var buildDirExists = fs.existsSync(actualBuildDir(buildConfig));
+  if (!buildDirExists) {
+    fs.mkdirSync(actualBuildDir(buildConfig));
+  }
   var resourceCachePath =
     path.join(CWD, actualBuildDir(buildConfig), '__resourceCache.json');
   var packageDiagnosticsPath =
