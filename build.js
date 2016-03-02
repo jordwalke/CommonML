@@ -1243,11 +1243,11 @@ var sanitizedImmediateDependenciesPublicPaths = function(resourceCache, packageC
 /**
  * Flags for compiling (but not linking).
  */
-var getSingleFileCompileFlags = function(packageConfig, buildConfig, annot) {
+var getSingleFileCompileFlags = function(packageConfig, buildConfig, annot, buildLib) {
   var compileFlags = packageConfig.packageJSON.CommonML.compileFlags || [];
   var preprocessor = packageConfig.packageJSON.CommonML.preprocessor;
   return compileFlags.concat([
-    '-c',
+    buildLib ? '-a' : '-c',
     annot ? '-bin-annot' : '',
     buildConfig.forDebug ? '-g' : '',
     preprocessor ? '-pp ' + preprocessor : ''
@@ -1604,6 +1604,7 @@ var getJustTheModuleArtifactsForAllPackages = function(rootPackageName, buildPac
       )
     );
   });
+
   return justTheModuleArtifacts;
 };
 
@@ -1611,10 +1612,24 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
   var packageResource = resourceCache[rootPackageName];
   var executableArtifact = buildForExecutable(packageResource, packageResource, buildConfig);
   var findlibLinkCommand = getFindlibCommand(packageResource, programForCompiler(buildConfig.compiler), true);
-  var justTheModuleArtifactsForAllPackages =
+  var allModuleArtifacts =
     getJustTheModuleArtifactsForAllPackages(rootPackageName, buildPackagesResultsCache, resourceCache);
 
 
+  var usersModuleArtifacts = allModuleArtifacts
+    .filter(function(v) {
+      return v.indexOf(packageResource.packageName) > -1;
+    });
+  var justTheModuleArtifactsForDependencies = allModuleArtifacts
+    .filter(function(v) {
+      return v.indexOf(packageResource.packageName) === -1;
+    })
+    .map(function(v) {
+      if (v.indexOf('privateInnerModules') > -1 || v.indexOf('publicInnerModules') > -1) {
+        return v;
+      }
+      return v.replace('.cmo', '.cma');
+    });
   var commonML = packageResource.packageJSON.CommonML;
   var linkFlags = commonML.linkFlags || [];
   var compileFlags = commonML.compileFlags || []; // TODO: Rename 'rootCompileFlags'
@@ -1625,7 +1640,8 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
     .concat(['-o', executableArtifact])
     .concat(buildConfig.forDebug ? ['-g'] : [])
     .concat(linkFlags)
-    .concat(justTheModuleArtifactsForAllPackages)
+    .concat(justTheModuleArtifactsForDependencies)
+    .concat(usersModuleArtifacts)
     .join(' ');
 
   // Can only build the top level packages into JS - ideally we'd also be
@@ -1800,7 +1816,6 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
       rootPackageResource,
       buildConfig
     );
-    var singleFileCompileFlags = getSingleFileCompileFlags(packageResource, buildConfig, true);
 
     var searchPaths = makeSearchPathStrings(
       fileOutputDirs
@@ -1812,7 +1827,7 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
 
     var singleFileCompile =
       [compileCommand]
-      .concat(singleFileCompileFlags)
+      .concat(getSingleFileCompileFlags(packageResource, buildConfig, true, false))
       .concat(searchPaths)
       .concat(['-open', autogenAliases.internalModuleName]).join(' ') + ' ';
 
@@ -1827,7 +1842,7 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
     // Always repack regardless of what changed it's pretty cheap.
     var compileAliasesCommand =
       [compileCommand]
-      .concat(singleFileCompileFlags)
+      .concat(getSingleFileCompileFlags(packageResource, buildConfig, true, true))
       // -bin-annot generates .cmt files for the pack which merlin needs to
       // work correctly.
       // Need to add -49 so that it doesn't complain because we haven't
@@ -1839,8 +1854,14 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
         autogenAliases.genSourceFiles.internalInterface,
         autogenAliases.genSourceFiles.internalImplementation,
       ])
+      .concat(commonML.linkFlags)
+      // Used only for C dependencies currently. Should be only _already_ built
+      // files.
+      .concat(commonML.foreignDependencies && commonML.foreignDependencies.length > 0
+        ? ['-custom'].concat(commonML.foreignDependencies.map(function(v){ return path.join(packageResource.realPath, v); }))
+        : [])
+      .concat(['-o', autogenAliases.genSourceFiles.internalImplementation.replace('.ml', '.cma')])
       .join(' ');
-
     var ensureDirectoriesCommand = ['mkdir', '-p', ].concat(fileOutputDirs).join(' ');
     var justTheModuleArtifacts =
       getModuleArtifacts(dependencySuccessfulResults, packageResource, rootPackageResource, buildConfig);
