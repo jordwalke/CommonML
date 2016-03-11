@@ -416,7 +416,7 @@ var createSymlinkCommands = function(from, to) {
     // it before we try to link it.
     ['touch', from].join(' '),
     ['unlink', from].join(' '),
-    ['ln', '-s', to, from].join(' ')
+    ['ln', '-s', path.relative(symlinkIsInDir, to), from].join(' ')
   ];
 };
 
@@ -528,6 +528,19 @@ var buildForModuleMap = function(packageConfig, rootPackageConfig, buildConfig) 
   var unsanitizedExecPath =
     path.join(packageConfig.realPath, lowerBase(packageConfig.packageName) + '.moduleMap');
   return sanitizedArtifact(unsanitizedExecPath, packageConfig, rootPackageConfig, buildConfig);
+};
+
+
+/**
+ * Retrieves the absolute path to where a `.merlin` will be generated. This is
+ * different than many of the other build artifacts because a merlin is
+ * generated in each of the dependency source directories. Ideally it would
+ * also be generated in the same build sandbox, but this is so that it works
+ * better with merlin IIRC.
+ *
+ */
+var buildForPackageMerlin = function(packageResource) {
+  return path.join(packageResource.realPath, '.merlin');
 };
 
 var isExported = function(packageConfig, filePath) {
@@ -978,7 +991,7 @@ var verifyPackageConfig = function(packageResource, resourceCache) {
   return foundErrors;
 };
 
-var generateDotMerlinForPackage = function(resourceCache, autogenAliases, moduleArtifacts, rootPackageName, packageName ) {
+var generateDotMerlinForPackage = function(merlinPath, resourceCache, autogenAliases, moduleArtifacts, rootPackageName, packageName ) {
   var packageConfig = resourceCache[packageName];
   var rootPackageConfig = resourceCache[rootPackageName];
   var commonML = packageConfig.packageJSON.CommonML;
@@ -1028,11 +1041,12 @@ var generateDotMerlinForPackage = function(resourceCache, autogenAliases, module
     getSanitizedBuildDirs(packageConfig, rootPackageConfig, buildConfig)
     .concat(sanitizedImmediateDependenciesPublicPaths(resourceCache, packageConfig, rootPackageConfig, buildConfig));
   // For now, we build right where we have source files
-  var buildLines = merlinBuildDirs.map(function(src) {return 'B ' + src;});
+  var containingMerlinDir = path.resolve(merlinPath, '..');
+  var buildLines = merlinBuildDirs.map(function(src) {return 'B ' + path.relative(containingMerlinDir, src);});
   var merlinSourceDirs =
     packageConfig.packageResources.directories
     .concat(depSourceDirs);
-  var sourceLines = merlinSourceDirs.map(function(src) {return 'S ' + src;});
+  var sourceLines = merlinSourceDirs.map(function(src) {return 'S ' + path.relative(containingMerlinDir, src);});
   var dotMerlinSource = sourceLines.concat(buildLines)
   .concat(buildTags)
   .concat(pkgs)
@@ -1868,11 +1882,11 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
       ]).join('\n');
 
     if (needsRegenerateDotMerlin) {
-      var merlinPath = path.join(packageResource.realPath, '.merlin');
+      var merlinPath = buildForPackageMerlin(packageResource);
       var merlinCommand = [
         'echo " > Autocomplete .merlin file for ' + merlinPath + ':"',
         'echo "',
-        generateDotMerlinForPackage(resourceCache, autogenAliases, justTheModuleArtifacts, rootPackageName, packageName),
+        generateDotMerlinForPackage(merlinPath, resourceCache, autogenAliases, justTheModuleArtifacts, rootPackageName, packageName),
         '" > ' + merlinPath,
       ].join('\n');
     }
