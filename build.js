@@ -349,6 +349,14 @@ var objectExtension = function(buildConfig) {
   }
 };
 
+var libraryExtension = function(buildConfig) {
+  if (buildConfig.compiler === 'native') {
+    return '.cmxa';
+  } else {
+    return '.cma';
+  }
+};
+
 var log = function() {
   if (cliConfig.silent) {
     return;
@@ -513,6 +521,11 @@ var buildArtifact = function(filePath, buildConfig, packageConfig) {
   return kind === '.ml' ? path.resolve(filePath, '..', basenameBase + objectExtension(buildConfig)) :
     kind === '.mli' ? path.resolve(filePath, '..', basenameBase + '.cmi') :
     'NEVER_HAPPENS';
+};
+
+var getLibraryArtifact = function(filePath, buildConfig) {
+  var basenameBase = path.basename(filePath, path.extname(filePath));
+  return path.resolve(filePath, '..', basenameBase + libraryExtension(buildConfig));
 };
 
 var buildForExecutable = function(packageConfig, rootPackageConfig, buildConfig) {
@@ -1615,20 +1628,15 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
   var allModuleArtifacts =
     getJustTheModuleArtifactsForAllPackages(rootPackageName, buildPackagesResultsCache, resourceCache);
 
-
-  var usersModuleArtifacts = allModuleArtifacts
-    .filter(function(v) {
-      return v.indexOf(packageResource.packageName) > -1;
-    });
   var justTheModuleArtifactsForDependencies = allModuleArtifacts
     .filter(function(v) {
-      return v.indexOf(packageResource.packageName) === -1;
+      return v.length > 0;
     })
     .map(function(v) {
       if (v.indexOf('privateInnerModules') > -1 || v.indexOf('publicInnerModules') > -1) {
         return v;
       }
-      return v.replace('.cmo', '.cma');
+      return getLibraryArtifact(v, buildConfig);
     });
   var commonML = packageResource.packageJSON.CommonML;
   var linkFlags = commonML.linkFlags || [];
@@ -1641,7 +1649,6 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
     .concat(buildConfig.forDebug ? ['-g'] : [])
     .concat(linkFlags)
     .concat(justTheModuleArtifactsForDependencies)
-    .concat(usersModuleArtifacts)
     .join(' ');
 
   // Can only build the top level packages into JS - ideally we'd also be
@@ -1729,6 +1736,16 @@ var getSomeDependencyTriggeredRebuild = function(subpackageNames, resultsCache) 
   });
   return someDependencyTriggeredRebuild;
 };
+
+var getLinkingRelatedArgs = function(foreignDependencies, packageResource, buildConfig) {
+  if (!foreignDependencies || foreignDependencies.length === 0) {
+    return [];
+  }
+
+  return (buildConfig.compiler === 'byte' ? ['-custom'] : []).concat(foreignDependencies.map(function(v){
+    return path.join(packageResource.realPath, v);
+  }));
+}
 
 /**
  * TODO: Minimal *inter* pacakge rebuilds: "Pure Interfaced" packages. If every
@@ -1857,10 +1874,8 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
       .concat(commonML.linkFlags)
       // Used only for C dependencies currently. Should be only _already_ built
       // files.
-      .concat(commonML.foreignDependencies && commonML.foreignDependencies.length > 0
-        ? ['-custom'].concat(commonML.foreignDependencies.map(function(v){ return path.join(packageResource.realPath, v); }))
-        : [])
-      .concat(['-o', autogenAliases.genSourceFiles.internalImplementation.replace('.ml', '.cma')])
+      .concat(getLinkingRelatedArgs(commonML.foreignDependencies, packageResource, buildConfig))
+      .concat(['-o', getLibraryArtifact(autogenAliases.genSourceFiles.internalImplementation, buildConfig)])
       .join(' ');
     var ensureDirectoriesCommand = ['mkdir', '-p', ].concat(fileOutputDirs).join(' ');
     var justTheModuleArtifacts =
