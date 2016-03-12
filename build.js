@@ -518,14 +518,14 @@ var maybeSourceKind = function(filePath, packageConfig) {
 var buildArtifact = function(filePath, buildConfig, packageConfig) {
   var kind = maybeSourceKind(filePath, packageConfig);
   var basenameBase = path.basename(filePath, path.extname(filePath));
-  return kind === '.ml' ? path.resolve(filePath, '..', basenameBase + objectExtension(buildConfig)) :
+  return kind === '.ml' ? path.resolve(filePath, '..', basenameBase + (packageConfig.packageJSON.CommonML.buildAsLib ? libraryExtension(buildConfig) : objectExtension(buildConfig))) :
     kind === '.mli' ? path.resolve(filePath, '..', basenameBase + '.cmi') :
     'NEVER_HAPPENS';
 };
 
-var getLibraryArtifact = function(filePath, buildConfig) {
+var getLibraryArtifact = function(CommonML, filePath, buildConfig) {
   var basenameBase = path.basename(filePath, path.extname(filePath));
-  return path.resolve(filePath, '..', basenameBase + libraryExtension(buildConfig));
+  return path.resolve(filePath, '..', basenameBase + (CommonML.buildAsLib ? libraryExtension(buildConfig) : objectExtension(buildConfig)));
 };
 
 var buildForExecutable = function(packageConfig, rootPackageConfig, buildConfig) {
@@ -700,6 +700,8 @@ var getModuleArtifacts = function(unsanitizedPaths, packageConfig, rootPackageCo
       sanitizedArtifact(unsanitizedPath, packageConfig, rootPackageConfig, buildConfig),
       '..', namespaceLowercase(packageConfig, basename) + objectExtension(buildConfig)
     ) : '';
+  }).filter(function(filePath) {
+    return filePath.length > 0;
   });
 };
 
@@ -841,7 +843,6 @@ var verifyPackageJSONFile = function(packageName, containingDir, packageJSON) {
   var foundPackageJSONInvalidations = [];
   var lowerKeys = Object.keys(packageJSON).map(function(k) {
     return k.toLowerCase();
-
   });
   if (!('CommonML' in packageJSON)) {
     if (lowerKeys.indexOf('commonml') !== -1) {
@@ -872,7 +873,8 @@ var verifyPackageJSONFile = function(packageName, containingDir, packageJSON) {
     docFlags: true,
     extensions: true,
     preprocessor: true,
-    findlibPackages: true
+    findlibPackages: true,
+    buildAsLib: true,
   });
   miscased = miscased.concat(ensureNotMisCase(packageName, packageJSON, {
     CommonML: true
@@ -1260,7 +1262,7 @@ var getSingleFileCompileFlags = function(packageConfig, buildConfig, annot, buil
   var compileFlags = packageConfig.packageJSON.CommonML.compileFlags || [];
   var preprocessor = packageConfig.packageJSON.CommonML.preprocessor;
   return compileFlags.concat([
-    buildLib ? '-a' : '-c',
+    buildLib && packageConfig.packageJSON.CommonML.buildAsLib ? '-a' : '-c',
     annot ? '-bin-annot' : '',
     buildConfig.forDebug ? '-g' : '',
     preprocessor ? '-pp ' + preprocessor : ''
@@ -1410,11 +1412,24 @@ function getSubprojectPackageDescriptors(nodeModulesDir) {
   return ret;
 }
 
+function getCommonMLDefaults(CommonML) {
+  var copyCommonML = JSON.parse(JSON.stringify(CommonML));
+  return merge({
+      buildAsLib: true,
+      foreignDependencies: [],
+      compileFlags: [],
+      linkFlags: [],
+  }, CommonML);
+}
+
 function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir) {
   var packageJSON = getPackageJSONForPackage(absRootDir);
   var rootPackageName = packageJSON.name;
   var foundPackageInvalidations = [];
   var foundPackageJSONInvalidations = verifyPackageJSONFile(rootPackageName, absRootDir, packageJSON);
+
+  packageJSON.CommonML = getCommonMLDefaults(packageJSON.CommonML);
+
   if (foundPackageJSONInvalidations.length !== 0) {
     return foundPackageJSONInvalidations;
   } else {
@@ -1611,7 +1626,7 @@ var getJustTheModuleArtifactsForAllPackages = function(rootPackageName, buildPac
       justTheModuleArtifacts,
       getModuleArtifacts(
         buildPackagesResultsCache.versionedResultsByPackageName[packageName].results.dependencyResults.successfulResults,
-        resourceCache[packageName],
+        packageResource,
         resourceCache[rootPackageName],
         buildConfig
       )
@@ -1628,16 +1643,6 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
   var allModuleArtifacts =
     getJustTheModuleArtifactsForAllPackages(rootPackageName, buildPackagesResultsCache, resourceCache);
 
-  var justTheModuleArtifactsForDependencies = allModuleArtifacts
-    .filter(function(v) {
-      return v.length > 0;
-    })
-    .map(function(v) {
-      if (v.indexOf('privateInnerModules') > -1 || v.indexOf('publicInnerModules') > -1) {
-        return v;
-      }
-      return getLibraryArtifact(v, buildConfig);
-    });
   var commonML = packageResource.packageJSON.CommonML;
   var linkFlags = commonML.linkFlags || [];
   var compileFlags = commonML.compileFlags || []; // TODO: Rename 'rootCompileFlags'
@@ -1648,7 +1653,7 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
     .concat(['-o', executableArtifact])
     .concat(buildConfig.forDebug ? ['-g'] : [])
     .concat(linkFlags)
-    .concat(justTheModuleArtifactsForDependencies)
+    .concat(allModuleArtifacts)
     .join(' ');
 
   // Can only build the top level packages into JS - ideally we'd also be
@@ -1738,12 +1743,12 @@ var getSomeDependencyTriggeredRebuild = function(subpackageNames, resultsCache) 
 };
 
 var getLinkingRelatedArgs = function(foreignDependencies, packageResource, buildConfig) {
-  if (!foreignDependencies || foreignDependencies.length === 0) {
+  if (foreignDependencies.length === 0) {
     return [];
   }
 
-  return (buildConfig.compiler === 'byte' ? ['-custom'] : []).concat(foreignDependencies.map(function(v){
-    return path.join(packageResource.realPath, v);
+  return (buildConfig.compiler === 'byte' ? ['-custom'] : []).concat(foreignDependencies.map(function(sourceFile) {
+    return path.join(packageResource.realPath, path.basename(sourceFile, path.extname(sourceFile))) + ".o";
   }));
 }
 
@@ -1856,6 +1861,22 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
     var compileModulesCommands =
       singleFileCompile + compileModuleOutputs.map( function(c){return c.compileOutputString;}).join(' ');
 
+    var compileForeignDependencies = null;
+    if (commonML.foreignDependencies.length > 0) {
+      // We cd into the main directory of the library, then run the C build
+      // command, then cd back to the user's library directory. This seems to be
+      // the only way to control where the output .o file should be generated.
+      compileForeignDependencies =
+        ['cd', packageResource.realPath, '&&']
+        .concat(programForCompiler(buildConfig.compiler))
+        .concat(['-c'])
+        .concat(commonML.foreignDependencies.map(function(fileName) {
+          return path.join(packageResource.realPath, fileName);
+        }))
+        .concat(['&& cd', rootPackageResource.realPath])
+        .join(' ');
+    }
+
     // Always repack regardless of what changed it's pretty cheap.
     var compileAliasesCommand =
       [compileCommand]
@@ -1875,7 +1896,7 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
       // Used only for C dependencies currently. Should be only _already_ built
       // files.
       .concat(getLinkingRelatedArgs(commonML.foreignDependencies, packageResource, buildConfig))
-      .concat(['-o', getLibraryArtifact(autogenAliases.genSourceFiles.internalImplementation, buildConfig)])
+      .concat(['-o', getLibraryArtifact(commonML, autogenAliases.genSourceFiles.internalImplementation, buildConfig)])
       .join(' ');
     var ensureDirectoriesCommand = ['mkdir', '-p', ].concat(fileOutputDirs).join(' ');
     var justTheModuleArtifacts =
@@ -1925,6 +1946,7 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
     // package.
     needsRegenerateDotMerlin && buildScriptForThisPackage.push(merlinCommand);
     buildScriptForThisPackage.push(compileCmdMsg);
+    compileForeignDependencies && buildScriptForThisPackage.push(compileForeignDependencies);
     buildScriptForThisPackage.push.apply(buildScriptForThisPackage, compileCommands);
     var buildScripts = [{
       description: 'Build Script For ' + packageResource.packageName,
