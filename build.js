@@ -190,6 +190,7 @@ invariant(
   buildConfig.jsCompile ? buildConfig.compiler === 'byte' : true,
   'Building for JS required the --compiler=byte (which is the default)'
 );
+
 invariant(
   buildConfig.compiler === 'byte' ||
   buildConfig.compiler === 'native',
@@ -518,14 +519,14 @@ var maybeSourceKind = function(filePath, packageConfig) {
 var buildArtifact = function(filePath, buildConfig, packageConfig) {
   var kind = maybeSourceKind(filePath, packageConfig);
   var basenameBase = path.basename(filePath, path.extname(filePath));
-  return kind === '.ml' ? path.resolve(filePath, '..', basenameBase + (packageConfig.packageJSON.CommonML.buildAsLib ? libraryExtension(buildConfig) : objectExtension(buildConfig))) :
+  return kind === '.ml' ? path.resolve(filePath, '..', basenameBase + libraryExtension(buildConfig)) :
     kind === '.mli' ? path.resolve(filePath, '..', basenameBase + '.cmi') :
     'NEVER_HAPPENS';
 };
 
-var getLibraryArtifact = function(CommonML, filePath, buildConfig) {
+var getLibraryArtifact = function(filePath, buildConfig) {
   var basenameBase = path.basename(filePath, path.extname(filePath));
-  return path.resolve(filePath, '..', basenameBase + (CommonML.buildAsLib ? libraryExtension(buildConfig) : objectExtension(buildConfig)));
+  return path.resolve(filePath, '..', basenameBase + libraryExtension(buildConfig));
 };
 
 var buildForExecutable = function(packageConfig, rootPackageConfig, buildConfig) {
@@ -874,7 +875,6 @@ var verifyPackageJSONFile = function(packageName, containingDir, packageJSON) {
     extensions: true,
     preprocessor: true,
     findlibPackages: true,
-    buildAsLib: true,
   });
   miscased = miscased.concat(ensureNotMisCase(packageName, packageJSON, {
     CommonML: true
@@ -903,6 +903,18 @@ var verifyPackageJSONFile = function(packageName, containingDir, packageJSON) {
       );
     }
   }
+
+  if (buildConfig.jsCompile && CommonML.foreignDependencies && CommonML.foreignDependencies.length > 0) {
+    foundPackageJSONInvalidations.push({
+      scope: 'project',
+      providerName: 'CommonML',
+      type: 'ERROR',
+      filePath: '',
+      text: 'Failed to build project. Cannot build dependency `' + packageName + '` (' + packageJSONPath + ') with js_of_ocaml.',
+      range: [[1, 0], [1, 0]]
+    });
+  }
+
   return foundPackageJSONInvalidations;
 };
 
@@ -1258,11 +1270,11 @@ var sanitizedImmediateDependenciesPublicPaths = function(resourceCache, packageC
 /**
  * Flags for compiling (but not linking).
  */
-var getSingleFileCompileFlags = function(packageConfig, buildConfig, annot, buildLib) {
+var getSingleFileCompileFlags = function(packageConfig, buildConfig, annot, buildAsLib) {
   var compileFlags = packageConfig.packageJSON.CommonML.compileFlags || [];
   var preprocessor = packageConfig.packageJSON.CommonML.preprocessor;
   return compileFlags.concat([
-    buildLib && packageConfig.packageJSON.CommonML.buildAsLib ? '-a' : '-c',
+    buildAsLib ? '-a' : '-c',
     annot ? '-bin-annot' : '',
     buildConfig.forDebug ? '-g' : '',
     preprocessor ? '-pp ' + preprocessor : ''
@@ -1415,7 +1427,6 @@ function getSubprojectPackageDescriptors(nodeModulesDir) {
 function getCommonMLDefaults(CommonML) {
   var copyCommonML = JSON.parse(JSON.stringify(CommonML));
   return merge({
-      buildAsLib: true,
       foreignDependencies: [],
       compileFlags: [],
       linkFlags: [],
@@ -1742,14 +1753,15 @@ var getSomeDependencyTriggeredRebuild = function(subpackageNames, resultsCache) 
   return someDependencyTriggeredRebuild;
 };
 
-var getLinkingRelatedArgs = function(foreignDependencies, packageResource, buildConfig) {
+var getLinkingRelatedArgs = function(foreignDependencies, pathToForeignDependenciesArtifacts, buildConfig) {
   if (foreignDependencies.length === 0) {
     return [];
   }
 
-  return (buildConfig.compiler === 'byte' ? ['-custom'] : []).concat(foreignDependencies.map(function(sourceFile) {
-    return path.join(packageResource.realPath, path.basename(sourceFile, path.extname(sourceFile))) + ".o";
-  }));
+  return (buildConfig.compiler === 'byte' ? ['-custom'] : [])
+    .concat(foreignDependencies.map(function(sourceFile) {
+      return path.join(pathToForeignDependenciesArtifacts, path.basename(sourceFile, path.extname(sourceFile))) + ".o";
+    }));
 }
 
 /**
@@ -1861,19 +1873,22 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
     var compileModulesCommands =
       singleFileCompile + compileModuleOutputs.map( function(c){return c.compileOutputString;}).join(' ');
 
+    var pathToForeignDependenciesArtifacts =
+      path.join(rootPackageResource.realPath, actualBuildDir(buildConfig), packageResource.packageName, "foreignDependencies");
     var compileForeignDependencies = null;
     if (commonML.foreignDependencies.length > 0) {
-      // We cd into the main directory of the library, then run the C build
+      // We cd into _build/PackageName/foreignDependencies, then run the C build
       // command, then cd back to the user's library directory. This seems to be
       // the only way to control where the output .o file should be generated.
       compileForeignDependencies =
-        ['cd', packageResource.realPath, '&&']
+        ['mkdir -p', pathToForeignDependenciesArtifacts, '&&']
+        .concat(['cd', pathToForeignDependenciesArtifacts, '&&'])
         .concat(programForCompiler(buildConfig.compiler))
         .concat(['-c'])
         .concat(commonML.foreignDependencies.map(function(fileName) {
           return path.join(packageResource.realPath, fileName);
         }))
-        .concat(['&& cd', rootPackageResource.realPath])
+        .concat(['; cd', rootPackageResource.realPath])
         .join(' ');
     }
 
@@ -1893,10 +1908,10 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
         autogenAliases.genSourceFiles.internalImplementation,
       ])
       .concat(commonML.linkFlags)
-      // Used only for C dependencies currently. Should be only _already_ built
-      // files.
-      .concat(getLinkingRelatedArgs(commonML.foreignDependencies, packageResource, buildConfig))
-      .concat(['-o', getLibraryArtifact(commonML, autogenAliases.genSourceFiles.internalImplementation, buildConfig)])
+      // Used only for C dependencies currently. Should be only already built
+      // after compileForeignDependencies
+      .concat(getLinkingRelatedArgs(commonML.foreignDependencies, pathToForeignDependenciesArtifacts, buildConfig))
+      .concat(['-o', getLibraryArtifact(autogenAliases.genSourceFiles.internalImplementation, buildConfig)])
       .join(' ');
     var ensureDirectoriesCommand = ['mkdir', '-p', ].concat(fileOutputDirs).join(' ');
     var justTheModuleArtifacts =
