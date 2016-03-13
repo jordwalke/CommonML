@@ -190,6 +190,7 @@ invariant(
   buildConfig.jsCompile ? buildConfig.compiler === 'byte' : true,
   'Building for JS required the --compiler=byte (which is the default)'
 );
+
 invariant(
   buildConfig.compiler === 'byte' ||
   buildConfig.compiler === 'native',
@@ -346,6 +347,14 @@ var objectExtension = function(buildConfig) {
     return '.cmx';
   } else {
     return '.cmo';
+  }
+};
+
+var libraryExtension = function(buildConfig) {
+  if (buildConfig.compiler === 'native') {
+    return '.cmxa';
+  } else {
+    return '.cma';
   }
 };
 
@@ -510,9 +519,14 @@ var maybeSourceKind = function(filePath, packageConfig) {
 var buildArtifact = function(filePath, buildConfig, packageConfig) {
   var kind = maybeSourceKind(filePath, packageConfig);
   var basenameBase = path.basename(filePath, path.extname(filePath));
-  return kind === '.ml' ? path.resolve(filePath, '..', basenameBase + objectExtension(buildConfig)) :
+  return kind === '.ml' ? path.resolve(filePath, '..', basenameBase + libraryExtension(buildConfig)) :
     kind === '.mli' ? path.resolve(filePath, '..', basenameBase + '.cmi') :
     'NEVER_HAPPENS';
+};
+
+var getLibraryArtifact = function(filePath, buildConfig) {
+  var basenameBase = path.basename(filePath, path.extname(filePath));
+  return path.resolve(filePath, '..', basenameBase + libraryExtension(buildConfig));
 };
 
 var buildForExecutable = function(packageConfig, rootPackageConfig, buildConfig) {
@@ -700,6 +714,8 @@ var getModuleArtifacts = function(unsanitizedPaths, packageConfig, rootPackageCo
       sanitizedArtifact(unsanitizedPath, packageConfig, rootPackageConfig, buildConfig),
       '..', namespaceLowercase(packageConfig, basename) + objectExtension(buildConfig)
     ) : '';
+  }).filter(function(filePath) {
+    return filePath.length > 0;
   });
 };
 
@@ -841,7 +857,6 @@ var verifyPackageJSONFile = function(packageName, containingDir, packageJSON) {
   var foundPackageJSONInvalidations = [];
   var lowerKeys = Object.keys(packageJSON).map(function(k) {
     return k.toLowerCase();
-
   });
   if (!('CommonML' in packageJSON)) {
     if (lowerKeys.indexOf('commonml') !== -1) {
@@ -872,7 +887,7 @@ var verifyPackageJSONFile = function(packageName, containingDir, packageJSON) {
     docFlags: true,
     extensions: true,
     preprocessor: true,
-    findlibPackages: true
+    findlibPackages: true,
   });
   miscased = miscased.concat(ensureNotMisCase(packageName, packageJSON, {
     CommonML: true
@@ -901,6 +916,18 @@ var verifyPackageJSONFile = function(packageName, containingDir, packageJSON) {
       );
     }
   }
+
+  if (buildConfig.jsCompile && CommonML.foreignDependencies && CommonML.foreignDependencies.length > 0) {
+    foundPackageJSONInvalidations.push({
+      scope: 'project',
+      providerName: 'CommonML',
+      type: 'ERROR',
+      filePath: '',
+      text: 'Failed to build project. Cannot build dependency `' + packageName + '` (' + packageJSONPath + ') with js_of_ocaml.',
+      range: [[1, 0], [1, 0]]
+    });
+  }
+
   return foundPackageJSONInvalidations;
 };
 
@@ -1257,11 +1284,11 @@ var sanitizedImmediateDependenciesPublicPaths = function(resourceCache, packageC
 /**
  * Flags for compiling (but not linking).
  */
-var getSingleFileCompileFlags = function(packageConfig, buildConfig, annot) {
+var getSingleFileCompileFlags = function(packageConfig, buildConfig, annot, buildAsLib) {
   var compileFlags = packageConfig.packageJSON.CommonML.compileFlags || [];
   var preprocessor = packageConfig.packageJSON.CommonML.preprocessor;
   return compileFlags.concat([
-    '-c',
+    buildAsLib ? '-a' : '-c',
     annot ? '-bin-annot' : '',
     buildConfig.forDebug ? '-g' : '',
     preprocessor ? '-pp ' + preprocessor : ''
@@ -1411,11 +1438,23 @@ function getSubprojectPackageDescriptors(nodeModulesDir) {
   return ret;
 }
 
+function getCommonMLDefaults(CommonML) {
+  var copyCommonML = JSON.parse(JSON.stringify(CommonML));
+  return merge({
+      foreignDependencies: [],
+      compileFlags: [],
+      linkFlags: [],
+  }, CommonML);
+}
+
 function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir) {
   var packageJSON = getPackageJSONForPackage(absRootDir);
   var rootPackageName = packageJSON.name;
   var foundPackageInvalidations = [];
   var foundPackageJSONInvalidations = verifyPackageJSONFile(rootPackageName, absRootDir, packageJSON);
+
+  packageJSON.CommonML = getCommonMLDefaults(packageJSON.CommonML);
+
   if (foundPackageJSONInvalidations.length !== 0) {
     return foundPackageJSONInvalidations;
   } else {
@@ -1612,12 +1651,13 @@ var getJustTheModuleArtifactsForAllPackages = function(rootPackageName, buildPac
       justTheModuleArtifacts,
       getModuleArtifacts(
         buildPackagesResultsCache.versionedResultsByPackageName[packageName].results.dependencyResults.successfulResults,
-        resourceCache[packageName],
+        packageResource,
         resourceCache[rootPackageName],
         buildConfig
       )
     );
   });
+
   return justTheModuleArtifacts;
 };
 
@@ -1625,9 +1665,8 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
   var packageResource = resourceCache[rootPackageName];
   var executableArtifact = buildForExecutable(packageResource, packageResource, buildConfig);
   var findlibLinkCommand = getFindlibCommand(packageResource, programForCompiler(buildConfig.compiler), true);
-  var justTheModuleArtifactsForAllPackages =
+  var allModuleArtifacts =
     getJustTheModuleArtifactsForAllPackages(rootPackageName, buildPackagesResultsCache, resourceCache);
-
 
   var commonML = packageResource.packageJSON.CommonML;
   var linkFlags = commonML.linkFlags || [];
@@ -1639,7 +1678,7 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
     .concat(['-o', executableArtifact])
     .concat(buildConfig.forDebug ? ['-g'] : [])
     .concat(linkFlags)
-    .concat(justTheModuleArtifactsForAllPackages)
+    .concat(allModuleArtifacts)
     .join(' ');
 
   // Can only build the top level packages into JS - ideally we'd also be
@@ -1728,6 +1767,17 @@ var getSomeDependencyTriggeredRebuild = function(subpackageNames, resultsCache) 
   return someDependencyTriggeredRebuild;
 };
 
+var getLinkingRelatedArgs = function(foreignDependencies, pathToForeignDependenciesArtifacts, buildConfig) {
+  if (foreignDependencies.length === 0) {
+    return [];
+  }
+
+  return (buildConfig.compiler === 'byte' ? ['-custom'] : [])
+    .concat(foreignDependencies.map(function(sourceFile) {
+      return path.join(pathToForeignDependenciesArtifacts, path.basename(sourceFile, path.extname(sourceFile))) + ".o";
+    }));
+}
+
 /**
  * TODO: Minimal *inter* pacakge rebuilds: "Pure Interfaced" packages. If every
  * *publicly* marked module has an interface file, then in many cases, it can
@@ -1814,7 +1864,6 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
       rootPackageResource,
       buildConfig
     );
-    var singleFileCompileFlags = getSingleFileCompileFlags(packageResource, buildConfig, true);
 
     var searchPaths = makeSearchPathStrings(
       fileOutputDirs
@@ -1826,7 +1875,7 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
 
     var singleFileCompile =
       [compileCommand]
-      .concat(singleFileCompileFlags)
+      .concat(getSingleFileCompileFlags(packageResource, buildConfig, true, false))
       .concat(searchPaths)
       .concat(['-open', autogenAliases.internalModuleName]).join(' ') + ' ';
 
@@ -1838,10 +1887,29 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
     var compileModulesCommands =
       singleFileCompile + compileModuleOutputs.map( function(c){return c.compileOutputString;}).join(' ');
 
+    var pathToForeignDependenciesArtifacts =
+      path.join(rootPackageResource.realPath, actualBuildDir(buildConfig), packageResource.packageName, "foreignDependencies");
+    var compileForeignDependencies = null;
+    if (commonML.foreignDependencies.length > 0) {
+      // We cd into _build/PackageName/foreignDependencies, then run the C build
+      // command, then cd back to the user's library directory. This seems to be
+      // the only way to control where the output .o file should be generated.
+      compileForeignDependencies =
+        ['mkdir -p', pathToForeignDependenciesArtifacts, '&&']
+        .concat(['cd', pathToForeignDependenciesArtifacts, '&&'])
+        .concat(programForCompiler(buildConfig.compiler))
+        .concat(['-c'])
+        .concat(commonML.foreignDependencies.map(function(fileName) {
+          return path.join(packageResource.realPath, fileName);
+        }))
+        .concat(['; cd', rootPackageResource.realPath])
+        .join(' ');
+    }
+
     // Always repack regardless of what changed it's pretty cheap.
     var compileAliasesCommand =
       [compileCommand]
-      .concat(singleFileCompileFlags)
+      .concat(getSingleFileCompileFlags(packageResource, buildConfig, true, true))
       // -bin-annot generates .cmt files for the pack which merlin needs to
       // work correctly.
       // Need to add -49 so that it doesn't complain because we haven't
@@ -1853,8 +1921,12 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
         autogenAliases.genSourceFiles.internalInterface,
         autogenAliases.genSourceFiles.internalImplementation,
       ])
+      .concat(commonML.linkFlags)
+      // Used only for C dependencies currently. Should be only already built
+      // after compileForeignDependencies
+      .concat(getLinkingRelatedArgs(commonML.foreignDependencies, pathToForeignDependenciesArtifacts, buildConfig))
+      .concat(['-o', getLibraryArtifact(autogenAliases.genSourceFiles.internalImplementation, buildConfig)])
       .join(' ');
-
     var ensureDirectoriesCommand = ['mkdir', '-p', ].concat(fileOutputDirs).join(' ');
     var justTheModuleArtifacts =
       getModuleArtifacts(dependencySuccessfulResults, packageResource, rootPackageResource, buildConfig);
@@ -1903,6 +1975,7 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
     // package.
     needsRegenerateDotMerlin && buildScriptForThisPackage.push(merlinCommand);
     buildScriptForThisPackage.push(compileCmdMsg);
+    compileForeignDependencies && buildScriptForThisPackage.push(compileForeignDependencies);
     buildScriptForThisPackage.push.apply(buildScriptForThisPackage, compileCommands);
     var buildScripts = [{
       description: 'Build Script For ' + packageResource.packageName,

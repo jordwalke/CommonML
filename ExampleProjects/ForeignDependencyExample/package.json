@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "description": "Simple example with foreign dependencies in OCaml",
+  "license": "BSD",
+  "name": "ForeignDependencyExample",
+  "dependencies": {
+    "OcamlAsciiTable": "git://github.com/chenglou/ascii-table.git",
+    "CommonML": "git://github.com/jordwalke/CommonML.git"
+  },
+  "CommonML": {
+    "exports": ["MyPublicModule"]
+  }
+}
