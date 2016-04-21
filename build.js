@@ -216,36 +216,36 @@ var validateFlags = function(compileFlags, linkFlags, packageName) {
   }
 };
 
-var traversePackagesInOrderImpl = function(visited, resourceCache, rootPackageName, cb) {
-  if (!visited[rootPackageName]) {
-    visited[rootPackageName] = true;
-    var subpackageNames = resourceCache[rootPackageName].subpackageNames;
+var traversePackagesInOrderImpl = function(visited, resourceCache, normalizedRootPackageName, cb) {
+  if (!visited[normalizedRootPackageName]) {
+    visited[normalizedRootPackageName] = true;
+    var subpackageNames = resourceCache[normalizedRootPackageName].subpackageNames;
     for (var i = 0; i < subpackageNames.length; i++) {
       var subpackageName = subpackageNames[i];
       traversePackagesInOrderImpl(visited, resourceCache, subpackageName, cb);
     }
-    cb(rootPackageName);
+    cb(normalizedRootPackageName);
   }
 };
-var traversePackagesInOrder = function(resourceCache, rootPackageName, cb) {
-  traversePackagesInOrderImpl({}, resourceCache, rootPackageName, cb);
+var traversePackagesInOrder = function(resourceCache, normalizedRootPackageName, cb) {
+  traversePackagesInOrderImpl({}, resourceCache, normalizedRootPackageName, cb);
 };
 
 /**
  * Like `traversePackagesInOrder`, but visits the same nodes multiple times.
  */
-var traversePackagesInOrderRedundantly = function(resourceCache, rootPackageName, cb) {
-  var subpackageNames = resourceCache[rootPackageName].subpackageNames;
+var traversePackagesInOrderRedundantly = function(resourceCache, normalizedRootPackageName, cb) {
+  var subpackageNames = resourceCache[normalizedRootPackageName].subpackageNames;
   for (var i = 0; i < subpackageNames.length; i++) {
     var subpackageName = subpackageNames[i];
     traversePackagesInOrderRedundantly(resourceCache, subpackageName, cb);
   }
-  cb(rootPackageName);
+  cb(normalizedRootPackageName);
 };
 
-var somePackageResultNecessitatesRelinking = function(resourceCache, rootPackageName, buildPackagesResultsCache, currentBuildId) {
+var somePackageResultNecessitatesRelinking = function(resourceCache, normalizedRootPackageName, buildPackagesResultsCache, currentBuildId) {
   var foundOne = false;
-  traversePackagesInOrder(resourceCache, rootPackageName, function(packageName) {
+  traversePackagesInOrder(resourceCache, normalizedRootPackageName, function(packageName) {
     if (buildPackagesResultsCache.versionedResultsByPackageName[packageName].lastBuildIdEffectingProject === currentBuildId) {
       foundOne = true;
     }
@@ -253,7 +253,7 @@ var somePackageResultNecessitatesRelinking = function(resourceCache, rootPackage
   return foundOne;
 };
 
-var drawBuildGraph =  function(resourceCache, resultsCache, rootPackageName) {
+var drawBuildGraph =  function(resourceCache, resultsCache, normalizedRootPackageName) {
   var isBlocked = function(resultsCache, packageName) {
     var currentBuildId = resultsCache.currentBuildId;
     var versionedResults = resultsCache.versionedResultsByPackageName[packageName];
@@ -307,8 +307,8 @@ var drawBuildGraph =  function(resourceCache, resultsCache, rootPackageName) {
     return [title].concat(!didSuppress ? subgraphs : subgraphs.concat(['⋯']));
   };
 
-  var executableTitle = "Executable(" + getTitle(resultsCache, rootPackageName) + ")";
-  var tree = [executableTitle, getBuildGraph({}, resourceCache, resultsCache, rootPackageName)];
+  var executableTitle = "Executable(" + getTitle(resultsCache, normalizedRootPackageName) + ")";
+  var tree = [executableTitle, getBuildGraph({}, resourceCache, resultsCache, normalizedRootPackageName)];
   var buildTreeLines = [
     "",
     "",
@@ -1018,9 +1018,9 @@ var verifyPackageConfig = function(packageResource, resourceCache) {
   return foundErrors;
 };
 
-var generateDotMerlinForPackage = function(merlinPath, resourceCache, autogenAliases, moduleArtifacts, rootPackageName, packageName ) {
+var generateDotMerlinForPackage = function(merlinPath, resourceCache, autogenAliases, moduleArtifacts, normalizedRootPackageName, packageName ) {
   var packageConfig = resourceCache[packageName];
-  var rootPackageConfig = resourceCache[rootPackageName];
+  var rootPackageConfig = resourceCache[normalizedRootPackageName];
   var commonML = packageConfig.packageJSON.CommonML;
   var linkFlags = commonML.linkFlags;
   var compileFlags = commonML.compileFlags || [];
@@ -1447,18 +1447,23 @@ function getCommonMLDefaults(CommonML) {
   }, CommonML);
 }
 
+// Turns my-package to MyPackage. Keeps MyOtherPackage as is.
+function normalizePackageNameForCommonML(name) {
+  return name[0].toUpperCase() + name.slice(1).replace(/-\S/g, function(l) {return l.slice(1).toUpperCase()});
+}
+
 function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir) {
   var packageJSON = getPackageJSONForPackage(absRootDir);
-  var rootPackageName = packageJSON.name;
+  var normalizedRootPackageName = normalizePackageNameForCommonML(packageJSON.name);
   var foundPackageInvalidations = [];
-  var foundPackageJSONInvalidations = verifyPackageJSONFile(rootPackageName, absRootDir, packageJSON);
+  var foundPackageJSONInvalidations = verifyPackageJSONFile(normalizedRootPackageName, absRootDir, packageJSON);
 
   packageJSON.CommonML = getCommonMLDefaults(packageJSON.CommonML);
 
   if (foundPackageJSONInvalidations.length !== 0) {
     return foundPackageJSONInvalidations;
   } else {
-    currentlyVisitingByPackageName[rootPackageName] = true;
+    currentlyVisitingByPackageName[normalizedRootPackageName] = true;
     var subprojectDir = path.join(absRootDir, 'node_modules');
     var subdescriptors = getSubprojectPackageDescriptors(subprojectDir);
     var subpackageNames = [];
@@ -1468,7 +1473,7 @@ function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageNam
         if (currentlyVisitingByPackageName[subpackageName]) {
           var msg = (
             'Circular dependency was detected from package ' +
-              rootPackageName + ' (' + absRootDir + ')' +
+              normalizedRootPackageName + ' (' + absRootDir + ')' +
               subdescriptor.realPath + ' to ' + absRootDir
           );
           // Don't recurse because inifinity
@@ -1482,14 +1487,14 @@ function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageNam
       }
       subpackageNames.push(subpackageName);
     }
-    resourceCache[rootPackageName] = {
-      packageName: rootPackageName,
+    resourceCache[normalizedRootPackageName] = {
+      packageName: normalizedRootPackageName,
       packageResources: getPackageResourcesForRoot(absRootDir),
       realPath: absRootDir,
       packageJSON: packageJSON,
       subpackageNames: subpackageNames
     };
-    var thisPackageInvalidations = verifyPackageConfig(resourceCache[rootPackageName], resourceCache);
+    var thisPackageInvalidations = verifyPackageConfig(resourceCache[normalizedRootPackageName], resourceCache);
     foundPackageInvalidations = thisPackageInvalidations.length ? foundPackageInvalidations.concat(thisPackageInvalidations) : foundPackageInvalidations;
     currentlyVisitingByPackageName[subpackageName] = false;
     return foundPackageInvalidations;
@@ -1504,7 +1509,7 @@ function recordPackageResourceCacheAndValidate(resourceCache, absRootDir) {
   var foundPackageInvalidations =
     recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir);
   var packageJSON = getPackageJSONForPackage(absRootDir);
-  return {foundPackageInvalidations: foundPackageInvalidations, rootPackageName: packageJSON.name};
+  return {foundPackageInvalidations: foundPackageInvalidations, normalizedRootPackageName: normalizePackageNameForCommonML(packageJSON.name)};
 };
 
 
@@ -1641,9 +1646,9 @@ var getEchoJsCommand = function(jsArtifact, dirToContainJsBuildDirSymlink) {
 // build artifacts. So we can supply all of the already built artifacts
 // (in the _build) folder, but that won't accept .cmi's so we must only
 // get the .cmos.
-var getJustTheModuleArtifactsForAllPackages = function(rootPackageName, buildPackagesResultsCache, resourceCache) {
+var getJustTheModuleArtifactsForAllPackages = function(normalizedRootPackageName, buildPackagesResultsCache, resourceCache) {
   var justTheModuleArtifacts = [];
-  traversePackagesInOrder(resourceCache, rootPackageName, function(packageName) {
+  traversePackagesInOrder(resourceCache, normalizedRootPackageName, function(packageName) {
     var autogenAliases = buildPackagesResultsCache.versionedResultsByPackageName[packageName].results.computedData.autogenAliases;
     var packageResource = resourceCache[packageName];
     justTheModuleArtifacts.push(buildArtifact(autogenAliases.genSourceFiles.internalImplementation, buildConfig, packageResource));
@@ -1652,7 +1657,7 @@ var getJustTheModuleArtifactsForAllPackages = function(rootPackageName, buildPac
       getModuleArtifacts(
         buildPackagesResultsCache.versionedResultsByPackageName[packageName].results.dependencyResults.successfulResults,
         packageResource,
-        resourceCache[rootPackageName],
+        resourceCache[normalizedRootPackageName],
         buildConfig
       )
     );
@@ -1661,12 +1666,12 @@ var getJustTheModuleArtifactsForAllPackages = function(rootPackageName, buildPac
   return justTheModuleArtifacts;
 };
 
-var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resourceCache, onDone) {
-  var packageResource = resourceCache[rootPackageName];
+var buildExecutable = function(normalizedRootPackageName, buildPackagesResultsCache, resourceCache, onDone) {
+  var packageResource = resourceCache[normalizedRootPackageName];
   var executableArtifact = buildForExecutable(packageResource, packageResource, buildConfig);
   var findlibLinkCommand = getFindlibCommand(packageResource, programForCompiler(buildConfig.compiler), true);
   var allModuleArtifacts =
-    getJustTheModuleArtifactsForAllPackages(rootPackageName, buildPackagesResultsCache, resourceCache);
+    getJustTheModuleArtifactsForAllPackages(normalizedRootPackageName, buildPackagesResultsCache, resourceCache);
 
   var commonML = packageResource.packageJSON.CommonML;
   var linkFlags = commonML.linkFlags || [];
@@ -1726,7 +1731,7 @@ var buildExecutable = function(rootPackageName, buildPackagesResultsCache, resou
 
   var compileCommands = [compileExecutableCommand].concat(shouldCompileExecutableIntoJS ? [buildJSCommands] : []);
 
-  var buildingExecMsg = "Compiling executable " + rootPackageName;
+  var buildingExecMsg = "Compiling executable " + normalizedRootPackageName;
   var compileCmdMsg =
     [boxMsg(buildingExecMsg)]
     .concat(compileCommands.length === 0 ? [] : [
@@ -1808,9 +1813,9 @@ var getLinkingRelatedArgs = function(foreignDependencies, pathToForeignDependenc
  * - Computing and generating .merlin files.
  *
  */
-var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, packageName, onDirtyDetectingBuilderDone) {
+var dirtyDetectingBuilder = function(normalizedRootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, packageName, onDirtyDetectingBuilderDone) {
   var packageResource = resourceCache[packageName];
-  var rootPackageResource = resourceCache[rootPackageName];
+  var rootPackageResource = resourceCache[normalizedRootPackageName];
   var lastSuccessfulPackageResource =
     prevResultsCache.versionedResultsByPackageName[packageName] ?
     prevResultsCache.versionedResultsByPackageName[packageName].lastSuccessfulPackageResource : null;
@@ -1958,7 +1963,7 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
       var merlinCommand = [
         'echo " > Autocomplete .merlin file for ' + merlinPath + ':"',
         'echo "',
-        generateDotMerlinForPackage(merlinPath, resourceCache, autogenAliases, justTheModuleArtifacts, rootPackageName, packageName),
+        generateDotMerlinForPackage(merlinPath, resourceCache, autogenAliases, justTheModuleArtifacts, normalizedRootPackageName, packageName),
         '" > ' + merlinPath,
       ].join('\n');
     }
@@ -2117,10 +2122,10 @@ var dirtyDetectingBuilder = function(rootPackageName, resultsCache, prevResultsC
  *      lastSuccessfulBuildId: anything
  *
  *
- * `dirtyDetectingBuilder(rootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, packageName, function(dependencyResults, buildResults, computedData, effectWholeProject, effectDependents) {})`
+ * `dirtyDetectingBuilder(normalizedRootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, packageName, function(dependencyResults, buildResults, computedData, effectWholeProject, effectDependents) {})`
  * `mapper(root, subpackagesResults, function(err, mapperResult) {})`
  */
-var walkProjectTree = function(rootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, dirtyDetectingBuilder, packageName, onRootDone) {
+var walkProjectTree = function(normalizedRootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, dirtyDetectingBuilder, packageName, onRootDone) {
   // If it's either WIP by another node, or done.
   var currentBuildId = resultsCache.currentBuildId;
   var alreadyBeingBuilt = resultsCache.alreadyBeingBuiltWithWaiters[packageName];
@@ -2156,7 +2161,7 @@ var walkProjectTree = function(rootPackageName, resultsCache, prevResultsCache, 
       // Build steps!
       var subpackageNames = resourceCache[packageName].subpackageNames;
       var forEachSubpackage = function(subpackageName, onSubpackageDone) {
-        walkProjectTree(rootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, dirtyDetectingBuilder, subpackageName, onSubpackageDone);
+        walkProjectTree(normalizedRootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, dirtyDetectingBuilder, subpackageName, onSubpackageDone);
       };
       var onAllSubpackagesDone = function(err) {
         var waiters = resultsCache.alreadyBeingBuiltWithWaiters[packageName];
@@ -2228,7 +2233,7 @@ var walkProjectTree = function(rootPackageName, resultsCache, prevResultsCache, 
             );
             onRootDone(null);
           };
-          dirtyDetectingBuilder(rootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, packageName, onBuildDone);
+          dirtyDetectingBuilder(normalizedRootPackageName, resultsCache, prevResultsCache, resourceCache, prevResourceCache, packageName, onBuildDone);
         }
       };
       async.eachLimit(subpackageNames, buildConfig.concurrency, forEachSubpackage, onAllSubpackagesDone);
@@ -2348,7 +2353,7 @@ function buildTree() {
 
   var resourceCache = {};
   var recordResult = recordPackageResourceCacheAndValidate(resourceCache, CWD);
-  var rootPackageName = recordResult.rootPackageName;
+  var normalizedRootPackageName = recordResult.normalizedRootPackageName;
   if (recordResult.foundPackageInvalidations.length) {
     logError(errorFormatter(recordResult.foundPackageInvalidations));
     log();
@@ -2377,7 +2382,7 @@ function buildTree() {
     log(errorFormatter(compileDiagnostics));
     log(errorFormatter(linkDiagnostics));
 
-    drawBuildGraph(resourceCache, buildPackagesResultsCache, rootPackageName);
+    drawBuildGraph(resourceCache, buildPackagesResultsCache, normalizedRootPackageName);
 
     if (!successful) {
       logError(clc.bold('Build Failure: Fix errors and try again'));
@@ -2387,9 +2392,9 @@ function buildTree() {
   };
 
   var continueToBuildExecutable = function() {
-    var rootBuildPackagesResults = buildPackagesResultsCache.versionedResultsByPackageName[rootPackageName];
+    var rootBuildPackagesResults = buildPackagesResultsCache.versionedResultsByPackageName[normalizedRootPackageName];
     var shouldRebuildExecutable =
-      somePackageResultNecessitatesRelinking(resourceCache, rootPackageName, buildPackagesResultsCache, buildPackagesResultsCache.currentBuildId) ||
+      somePackageResultNecessitatesRelinking(resourceCache, normalizedRootPackageName, buildPackagesResultsCache, buildPackagesResultsCache.currentBuildId) ||
       getBuildConfigMightChangeCompilation(buildExecutableResultsCache.buildConfig, prevBuildExecutableResultsCache.buildConfig) ||
       buildExecutableResultsCache.buildConfig.jsCompile && !prevBuildExecutableResultsCache.buildConfig.jsCompile;
 
@@ -2399,19 +2404,19 @@ function buildTree() {
       // No executable to build because a dependency failed.
       reportStatusAndBackup(false);
     } else if (shouldRebuildExecutable) {
-      logTitle('Building executable for ' + rootPackageName);
+      logTitle('Building executable for ' + normalizedRootPackageName);
       log();
       var onExecutableDone = function(buildResults, computedData) {
         if (!buildResults.err) {
-          logTitle('Executable built for ' + rootPackageName + ' at ' + computedData.executableArtifact);
+          logTitle('Executable built for ' + normalizedRootPackageName + ' at ' + computedData.executableArtifact);
           log();
           if (computedData.jsExecutableArtifact) {
-            logTitle('JavaScript Executable built for ' + rootPackageName + ' at ' + computedData.jsExecutableArtifact);
+            logTitle('JavaScript Executable built for ' + normalizedRootPackageName + ' at ' + computedData.jsExecutableArtifact);
             log();
           }
         }
         // var buildResults = {commands: buildScriptForThisPackage, successfulResults: buildOutput, err: null};
-        var mostRecent = prevBuildExecutableResultsCache.versionedResultsByPackageName[rootPackageName];
+        var mostRecent = prevBuildExecutableResultsCache.versionedResultsByPackageName[normalizedRootPackageName];
         if (!mostRecent) {
           mostRecent = {
             lastAttemptedBuildId: -1,
@@ -2425,7 +2430,7 @@ function buildTree() {
         var versionedResultForExecutable = {
           lastAttemptedBuildId: buildExecutableResultsCache.currentBuildId,
           lastSuccessfulBuildId: buildResults.err ? mostRecent.lastSuccessfulBuildId : buildExecutableResultsCache.currentBuildId,
-          lastSuccessfulPackageResource: buildResults.err ? mostRecent.lastSuccessfulPackageResource : resourceCache[rootPackageName],
+          lastSuccessfulPackageResource: buildResults.err ? mostRecent.lastSuccessfulPackageResource : resourceCache[normalizedRootPackageName],
           lastBuildIdEffectingProject: buildResults.err ? mostRecent.lastBuildIdEffectingProject : buildExecutableResultsCache.currentBuildId,
           lastBuildIdEffectingDependents: -1,
           results: {
@@ -2436,13 +2441,13 @@ function buildTree() {
             computedData: computedData
           }
         };
-        cacheVersionedResultAndNotifyWaiters(buildExecutableResultsCache, rootPackageName, versionedResultForExecutable, []);
+        cacheVersionedResultAndNotifyWaiters(buildExecutableResultsCache, normalizedRootPackageName, versionedResultForExecutable, []);
         reportStatusAndBackup(!buildResults.err);
       };
-      buildExecutable(rootPackageName, buildPackagesResultsCache, resourceCache, onExecutableDone);
+      buildExecutable(normalizedRootPackageName, buildPackagesResultsCache, resourceCache, onExecutableDone);
     } else {
       // No executable to build because either nothing required it, or some dependency failed.
-      logTitle('Skipped rebuilding executable ' + rootPackageName);
+      logTitle('Skipped rebuilding executable ' + normalizedRootPackageName);
       log();
       reportStatusAndBackup(true);
     }
@@ -2450,18 +2455,18 @@ function buildTree() {
 
   var continueToBuild = function() {
     walkProjectTree(
-      rootPackageName,
+      normalizedRootPackageName,
       buildPackagesResultsCache,
       prevBuildPackagesResultsCache,
       resourceCache,
       prevResourceCache,
       dirtyDetectingBuilder,
-      rootPackageName,
+      normalizedRootPackageName,
       continueToBuildExecutable
     );
   };
 
-  var yaccBuilder = function(rootPackageName, resultsCache, lexResultsCache, resourceCache, prevResourceCache, packageName, onDirtyDetectingBuilderDone) {
+  var yaccBuilder = function(normalizedRootPackageName, resultsCache, lexResultsCache, resourceCache, prevResourceCache, packageName, onDirtyDetectingBuilderDone) {
     var resource = resourceCache[packageName];
     var packageResources = resource.packageResources;
     var changedLexYaccFiles =
@@ -2516,16 +2521,16 @@ function buildTree() {
   // output in the _build directory (currently it's difficult because that
   // isn't be done until the final build step).
   if (buildConfig.yacc) {
-    logTitle('Building yacc dependencies for ' + rootPackageName);
+    logTitle('Building yacc dependencies for ' + normalizedRootPackageName);
     log();
     walkProjectTree(
-      rootPackageName,
+      normalizedRootPackageName,
       lexResultsCache,
       prevLexResultsCache,
       resourceCache,
       prevResourceCache,
       yaccBuilder,
-      rootPackageName,
+      normalizedRootPackageName,
       function() {
         /**
          * Now that all projects have their mll/mly converted, scan all the
@@ -2534,7 +2539,7 @@ function buildTree() {
          */
         resourceCache = {};
         var recordResult = recordPackageResourceCacheAndValidate(resourceCache, CWD);
-        var rootPackageName = recordResult.rootPackageName;
+        var normalizedRootPackageName = recordResult.normalizedRootPackageName;
         if (recordResult.foundPackageInvalidations.length) {
           logError(errorFormatter(recordResult.foundPackageInvalidations));
           log();
@@ -2546,7 +2551,7 @@ function buildTree() {
       }
     );
   } else {
-    logTitle('Building dependency packages for ' + rootPackageName);
+    logTitle('Building dependency packages for ' + normalizedRootPackageName);
     log();
     continueToBuild();
   }
