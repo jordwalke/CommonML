@@ -2387,7 +2387,7 @@ function buildTree() {
     if (!successful) {
       logError(clc.bold('Build Failure: Fix errors and try again'));
     } else {
-      logProgress(clc.bold('Build Complete: Sucess!'));
+      logProgress(clc.bold('Build Complete: Success!'));
     }
   };
 
