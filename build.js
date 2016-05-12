@@ -1452,7 +1452,7 @@ function normalizePackageNameForCommonML(name) {
   return name[0].toUpperCase() + name.slice(1).replace(/-\S/g, function(l) {return l.slice(1).toUpperCase()});
 }
 
-function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir) {
+function buildPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir) {
   var packageJSON = getPackageJSONForPackage(absRootDir);
   var normalizedRootPackageName = normalizePackageNameForCommonML(packageJSON.name);
   var foundPackageInvalidations = [];
@@ -1481,24 +1481,53 @@ function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageNam
         } else {
           foundPackageInvalidations =
             foundPackageInvalidations.concat(
-              recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, subdescriptor.realPath)
+              buildPackageResourceCache(resourceCache, currentlyVisitingByPackageName, subdescriptor.realPath)
             );
         }
       }
-      subpackageNames.push(subpackageName);
+      if (packageJSON.dependencies.hasOwnProperty(subpackageName)) {
+        subpackageNames.push(subpackageName);
+      }
     }
     resourceCache[normalizedRootPackageName] = {
       packageName: normalizedRootPackageName,
       packageResources: getPackageResourcesForRoot(absRootDir),
       realPath: absRootDir,
       packageJSON: packageJSON,
-      subpackageNames: subpackageNames
+      subpackageNames: subpackageNames,
     };
-    var thisPackageInvalidations = verifyPackageConfig(resourceCache[normalizedRootPackageName], resourceCache);
-    foundPackageInvalidations = thisPackageInvalidations.length ? foundPackageInvalidations.concat(thisPackageInvalidations) : foundPackageInvalidations;
     currentlyVisitingByPackageName[subpackageName] = false;
     return foundPackageInvalidations;
   }
+}
+
+function recordSubpackageDependencies(resourceCache) {
+  var foundPackageInvalidations = [];
+  for (var packageName in resourceCache) {
+    var resource = resourceCache[packageName];
+    var packageJSON = resource.packageJSON;
+    var subpackageNames = resource.subpackageNames;
+    var subpackages = Object.keys(packageJSON.dependencies || {});
+    subpackages.forEach(function(pkg) {
+      // If the dependency has been found, but is not already referenced, it must
+      // have been found in a higher-up node_modules directory
+      if (resourceCache.hasOwnProperty(pkg) && subpackageNames.indexOf(pkg) < 0) {
+        subpackageNames.push(pkg);
+      }
+    });
+    var thisPackageInvalidations = verifyPackageConfig(resourceCache[packageName], resourceCache);
+    foundPackageInvalidations = thisPackageInvalidations.length ? foundPackageInvalidations.concat(thisPackageInvalidations) : foundPackageInvalidations;
+  }
+  return foundPackageInvalidations;
+}
+
+function recordPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir) {
+  // A two-pass approach to collect all package information and dependencies:
+  // The first pass records dependencies from nested node_modules directories, as encountered with npm@2.
+  // The second pass checks if any packages have unmet dependencies that were found elsewhere in the tree,
+  // accounting for the flatter arrangement of npm@3.
+  var foundPackageInvalidations = buildPackageResourceCache(resourceCache, currentlyVisitingByPackageName, absRootDir);
+  return foundPackageInvalidations.concat(recordSubpackageDependencies(resourceCache));
 }
 
 /**
