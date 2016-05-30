@@ -100,10 +100,11 @@ var renderClickableFileName = function(fileDiagnostic) {
 };
 
 var renderFileDiagnostic = function(fileDiagnostic) {
+  var rd = !buildConfig.color ? echo : clc.red;
   return [
-    clc.red("[" + fileDiagnostic.type + "] " + renderClickableFileName(fileDiagnostic)),
-    clc.red(fileDiagnostic.text),
-    fileDiagnostic.commonMLData && clc.red(fileDiagnostic.commonMLData.originalStdErr)
+    rd("[" + fileDiagnostic.type + "] " + renderClickableFileName(fileDiagnostic)),
+    rd(fileDiagnostic.text),
+    fileDiagnostic.commonMLData && rd(fileDiagnostic.commonMLData.originalStdErr)
   ].join('\n');
 };
 
@@ -141,6 +142,7 @@ var buildConfig = {
   buildDir: argv.buildDir || '_build',
   doc: argv.doc || false,
   forDebug: argv.forDebug === 'true',
+  color: argv.color !== 'false',
   jsCompile: argv.jsCompile === 'true',
   // The path to graphical debugger (coming soon).
   rebuggerPath: argv.rebuggerPath || null,
@@ -309,10 +311,14 @@ var drawBuildGraph =  function(resourceCache, resultsCache, normalizedRootPackag
 
   var executableTitle = "Executable(" + getTitle(resultsCache, normalizedRootPackageName) + ")";
   var tree = [executableTitle, getBuildGraph({}, resourceCache, resultsCache, normalizedRootPackageName)];
+  var bld = !buildConfig.color ? echo : clc.bold;
+  var rd = !buildConfig.color ? echo : clc.red;
+  var grn = !buildConfig.color ? echo : clc.green;
+  var art = !buildConfig.color ? echo : clc.art;
   var buildTreeLines = [
     "",
     "",
-    clc.bold("Build Graph:"),
+    bld("Build Graph:"),
     "",
     asciitree(tree),
     "",
@@ -321,10 +327,10 @@ var drawBuildGraph =  function(resourceCache, resultsCache, normalizedRootPackag
   ];
   var buildTreeText = buildTreeLines.join('\n');
   var style = {
-    "☒": clc.red('☒'),
-    "☑": clc.green('☑')
+    "☒": rd('☒'),
+    "☑": grn('☑')
   };
-  log(clc.art(buildTreeText, style));
+  log(art(buildTreeText, style));
 };
 
 var buildBypass = {
@@ -358,16 +364,18 @@ var libraryExtension = function(buildConfig) {
   }
 };
 
+var echo = function(m) {return Array.prototype.join.call(arguments, '');};
+
 var log = function() {
   if (cliConfig.silent) {
     return;
   }
-  var msg = clc.white;
+  var msg = !buildConfig.color ? echo : clc.white;
   console.log(msg.apply(msg, arguments));
 };
 
 var logError = function() {
-  var msg = clc.red;
+  var msg = !buildConfig.color ? echo : clc.red;
   if (cliConfig.silent) {
     return;
   }
@@ -377,14 +385,14 @@ var logTitle = function() {
   if (cliConfig.silent) {
     return;
   }
-  var msg = clc.yellow;
+  var msg = !buildConfig.color ? echo : clc.yellow;
   console.log(msg.apply(msg, arguments));
 };
 var logProgress = function() {
   if (cliConfig.silent) {
     return;
   }
-  var msg = clc.green;
+  var msg = !buildConfig.color ? echo : clc.green;
   console.log(msg.apply(msg, arguments));
 };
 
@@ -2385,7 +2393,7 @@ function buildTree() {
   var normalizedRootPackageName = recordResult.normalizedRootPackageName;
   if (recordResult.foundPackageInvalidations.length) {
     logError(errorFormatter(recordResult.foundPackageInvalidations));
-    log();
+    log('');
     log('Writing Package Errors: ' + packageDiagnosticsPath);
     fs.writeFileSync(packageDiagnosticsPath, JSON.stringify(recordResult.foundPackageInvalidations));
     return;
@@ -2397,7 +2405,7 @@ function buildTree() {
     log('  Build Packages Results cache: ' + buildPackagesResultsCachePath);
     log('  Build Executable Results cache: ' + buildExecutableResultsCachePath);
     log('  Yacc Results cache: ' + lexResultsCachePath);
-    log();
+    log('');
     fs.writeFileSync(resourceCachePath, JSON.stringify(resourceCache));
     fs.writeFileSync(buildPackagesResultsCachePath, JSON.stringify(buildPackagesResultsCache));
     fs.writeFileSync(buildExecutableResultsCachePath, JSON.stringify(buildExecutableResultsCache));
@@ -2413,10 +2421,11 @@ function buildTree() {
 
     drawBuildGraph(resourceCache, buildPackagesResultsCache, normalizedRootPackageName);
 
+    var bld = !buildConfig.color ? echo : clc.bold;
     if (!successful) {
-      logError(clc.bold('Build Failure: Fix errors and try again'));
+      logError(bld('Build Failure: Fix errors and try again'));
     } else {
-      logProgress(clc.bold('Build Complete: Success!'));
+      logProgress(bld('Build Complete: Success!'));
     }
   };
 
@@ -2434,14 +2443,14 @@ function buildTree() {
       reportStatusAndBackup(false);
     } else if (shouldRebuildExecutable) {
       logTitle('Building executable for ' + normalizedRootPackageName);
-      log();
+      log('');
       var onExecutableDone = function(buildResults, computedData) {
         if (!buildResults.err) {
           logTitle('Executable built for ' + normalizedRootPackageName + ' at ' + computedData.executableArtifact);
-          log();
+          log('');
           if (computedData.jsExecutableArtifact) {
             logTitle('JavaScript Executable built for ' + normalizedRootPackageName + ' at ' + computedData.jsExecutableArtifact);
-            log();
+            log('');
           }
         }
         // var buildResults = {commands: buildScriptForThisPackage, successfulResults: buildOutput, err: null};
@@ -2477,7 +2486,7 @@ function buildTree() {
     } else {
       // No executable to build because either nothing required it, or some dependency failed.
       logTitle('Skipped rebuilding executable ' + normalizedRootPackageName);
-      log();
+      log('');
       reportStatusAndBackup(true);
     }
   };
@@ -2551,7 +2560,7 @@ function buildTree() {
   // isn't be done until the final build step).
   if (buildConfig.yacc) {
     logTitle('Building yacc dependencies for ' + normalizedRootPackageName);
-    log();
+    log('');
     walkProjectTree(
       normalizedRootPackageName,
       lexResultsCache,
@@ -2571,7 +2580,7 @@ function buildTree() {
         var normalizedRootPackageName = recordResult.normalizedRootPackageName;
         if (recordResult.foundPackageInvalidations.length) {
           logError(errorFormatter(recordResult.foundPackageInvalidations));
-          log();
+          log('');
           log('Writing Package Errors: ' + packageDiagnosticsPath);
           fs.writeFileSync(packageDiagnosticsPath, JSON.stringify(recordResult.foundPackageInvalidations));
           return;
@@ -2581,7 +2590,7 @@ function buildTree() {
     );
   } else {
     logTitle('Building dependency packages for ' + normalizedRootPackageName);
-    log();
+    log('');
     continueToBuild();
   }
 }
@@ -2589,7 +2598,7 @@ function buildTree() {
 var whenVerifiedPath = function() {
   try {
     logTitle('Scanning files from ' + CWD);
-    log();
+    log('');
     try {
       try {
         buildTree();
