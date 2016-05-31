@@ -19,9 +19,26 @@ var OCAMLC = 'ocamlc';
 var OCAMLOPT = 'ocamlopt';
 var OCAMLDEP = 'ocamldep';
 var OCAMLLEX = 'ocamllex';
+// ocamlyacc doesn't have a .opt for some reason.
 var OCAMLYACC = 'ocamlyacc';
 var OCAMLDOC = 'ocamldoc';
+
 var OCAMLFIND = 'ocamlfind';
+var ocamlfindPath = null;
+
+/**
+ * When findlib isn't available, and there are no findlib packages, we can
+ * fake what findlib would return.
+ */
+var fakeFindlib = function(toolchain) {
+  return toolchain === OCAMLC ?  'ocamlc.opt' :
+    toolchain === OCAMLOPT ? 'ocamlopt.opt' :
+    toolchain === OCAMLDEP ? 'ocamldep.opt' :
+    toolchain === OCAMLLEX ? 'ocamllex.opt' :
+    // ocamlyacc doesn't have a .opt for some reason.
+    toolchain === OCAMLYACC ? 'ocamlyacc' :
+    toolchain === OCAMLDOC ? 'ocamldoc.opt' : (invariant(false, "Invalid toolchain:" + toolchain));
+};
 
 /**
  * Error output adheres to the following Nuclide type definitions.
@@ -115,7 +132,7 @@ var cliConfig = {
 
 var emptyResult = {commands: null, successfulResults: null, err: null};
 
-var programForCompiler = function(comp) {
+var toolchainForMode = function(comp) {
   return comp === 'byte' ? OCAMLC :
          comp === 'native' ? OCAMLOPT :
          comp;
@@ -138,6 +155,7 @@ var buildConfig = {
   opt: argv.opt || 1,
   yacc: argv.yacc === 'true',
   compiler: argv.compiler || 'byte',
+  compilerDir: argv.compilerDir || '',
   concurrency: argv.concurrency || 4,
   buildDir: argv.buildDir || '_build',
   doc: argv.doc || false,
@@ -396,7 +414,7 @@ var logProgress = function() {
   console.log(msg.apply(msg, arguments));
 };
 
-var buildingMsg = '\nBuilding Root Package ' + CWD + ' [' + buildConfig.compiler + ']\n';
+var buildingMsg = '\nBuilding Root Package ' + CWD + ' [' + buildConfig.compiler + buildConfig.compilerDir + ']\n';
 logTitle(buildingMsg);
 
 
@@ -887,6 +905,24 @@ var verifyPackageJSONFile = function(packageName, containingDir, packageJSON) {
   if(CommonML.export) {
     foundPackageJSONInvalidations.push(createFileDiagnostic(packageJSONPath, msg + '"export" is not a valid field of "CommonML" in package.json'));
   }
+  if (CommonML.findlibPackages && CommonML.findlibPackages.length > 0 && ocamlfindPath === null) {
+    foundPackageJSONInvalidations.push(
+      createFileDiagnostic(
+        packageJSONPath,
+        msg + 'package specifies findlibPackages, but ocamlfind is not installed. ' +
+        'If you install OPAM, you will typically have `ocamlfind` installed as a result. ' +
+        'Install via brew: brew install opam.\n' +
+        'If you don\'t know what findlibPackages are, then it\'s likely the case that some ' +
+        'dependency requires them. Findlib pacakges are packages that are expected to be ' +
+        'installed globally and ocamlfind is a system for managing/searching that potentially ' +
+        'global namespace. The idea of a global namespace is completely in oppostion to CommonML. ' +
+        'CommonML\'s stance is that you should never receive an error like this because all dependencies ' +
+        'should be totally sandboxed as a dependency and you shouldn\'t need a complicated system just ' +
+        'to find where things are on your file system. Consider porting the findlib dependency into the ' +
+        'CommonML package format.'
+      )
+    );
+  }
   var miscased = ensureNotMisCase(packageName, CommonML, {
     exports: true,
     compileFlags: true,
@@ -1137,24 +1173,44 @@ var ocbFlagsForPackageCommand = function(command) {
  * pretty good idea anyway. If you don't supply `-linkpkg` nothing works when
  * it comes time to link.
  */
-var getFindlibCommand = function(packageResource, toolchainCommand, linkPkg) {
+var getFindlibCommand = function(packageResource, toolchainCommand, compilerDir, linkPkg) {
   var commonML = packageResource.packageJSON.CommonML;
-  var findlibPackages = commonML.findlibPackages;
+  var findlibPackages = commonML.findlibPackages || [];
   var hasFindlibPackages = findlibPackages && findlibPackages.length;
-  var findlibBuildCommand = OCAMLFIND + ' ' + toolchainCommand;
-  // It appears that using findlib is *faster* than not using it - but if you
-  // add several packages, then it's slower.
-  var findlibFlags =
-    hasFindlibPackages ?
-    findlibPackages.map(ocbFlagsForPackageCommand).join(' ') :
-    '';
+  if (ocamlfindPath === null) {
+    // If you had findlib packages, we would have already invalidated this
+    // package.
+    return path.join(compilerDir, fakeFindlib(toolchainCommand));
+  } else {
+    var findlibBuildCommand = OCAMLFIND + ' ' + toolchainCommand;
+    // It appears that using findlib is *faster* than not using it - but if you
+    // add several packages, then it's slower.
+    var findlibFlags = hasFindlibPackages ? findlibPackages.map(ocbFlagsForPackageCommand).join(' ') : '';
 
-  var findLib = [findlibBuildCommand, linkPkg ? '-linkpkg' : '', findlibFlags, '-only-show'].join(' ');
+    var findLib = [findlibBuildCommand, linkPkg ? '-linkpkg' : '', findlibFlags, '-only-show'].join(' ');
 
-  // Trimming off the white space is critical, since this will usually return a
-  // trailing newline which makes the command unusable
-  return child_process.execSync(findLib).toString().trim();
+    // Trimming off the white space is critical, since this will usually return a
+    // trailing newline which makes the command unusable
+    return path.join(compilerDir, child_process.execSync(findLib).toString().trim());
+  }
+};
 
+/**
+ * Lightweight use of findlib to get the right compiler name and combine with
+ * custom compiler path.
+ */
+var getFindlibCompiler = function(toolchainCommand, compilerDir) {
+  if (ocamlfindPath === null) {
+    // If you had findlib packages, we would have already invalidated this
+    // package.
+    return path.join(compilerDir, fakeFindlib(toolchainCommand));
+  } else {
+    var findlibBuildCommand = OCAMLFIND + ' ' + toolchainCommand;
+    var findLib = [findlibBuildCommand, '-only-show'].join(' ');
+    // Trimming off the white space is critical, since this will usually return a
+    // trailing newline which makes the command unusable
+    return path.join(compilerDir, child_process.execSync(findLib).toString().trim());
+  }
 };
 
 
@@ -1608,7 +1664,13 @@ var cacheVersionedResultAndNotifyWaiters = function(resultsCache, packageName, v
 var discoverDeps = function(resourceCache, packageName, onDone) {
   var packageResource = resourceCache[packageName];
   var packageResources = packageResource.packageResources;
-  var findlibOCamldepCommand = getFindlibCommand(resourceCache[packageName], programForCompiler(OCAMLDEP), false);
+  var findlibOCamldepCommand =
+    getFindlibCommand(
+      resourceCache[packageName],
+      OCAMLDEP,
+      buildConfig.compilerDir,
+      false
+    );
   log('> Computing dependencies for ' + packageResource.packageName + '\n\n');
   var preprocessor = packageResource.packageJSON.CommonML.preprocessor;
   var cmd =
@@ -1706,7 +1768,7 @@ var getJustTheModuleArtifactsForAllPackages = function(normalizedRootPackageName
 var buildExecutable = function(normalizedRootPackageName, buildPackagesResultsCache, resourceCache, onDone) {
   var packageResource = resourceCache[normalizedRootPackageName];
   var executableArtifact = buildForExecutable(packageResource, packageResource, buildConfig);
-  var findlibLinkCommand = getFindlibCommand(packageResource, programForCompiler(buildConfig.compiler), true);
+  var findlibLinkCommand = getFindlibCommand(packageResource, toolchainForMode(buildConfig.compiler), buildConfig.compilerDir, true);
   var allModuleArtifacts =
     getJustTheModuleArtifactsForAllPackages(normalizedRootPackageName, buildPackagesResultsCache, resourceCache);
 
@@ -1913,7 +1975,7 @@ var dirtyDetectingBuilder = function(normalizedRootPackageName, resultsCache, pr
     );
 
     var compileCommand =
-      getFindlibCommand(packageResource, programForCompiler(buildConfig.compiler), false);
+      getFindlibCommand(packageResource, toolchainForMode(buildConfig.compiler), buildConfig.compilerDir, false);
 
     var singleFileCompile =
       [compileCommand]
@@ -1939,7 +2001,7 @@ var dirtyDetectingBuilder = function(normalizedRootPackageName, resultsCache, pr
       compileForeignDependencies =
         ['mkdir -p', pathToForeignDependenciesArtifacts, '&&']
         .concat(['cd', pathToForeignDependenciesArtifacts, '&&'])
-        .concat(programForCompiler(buildConfig.compiler))
+        .concat(getFindlibCompiler(toolchainForMode(buildConfig.compiler), buildConfig.compilerDir))
         .concat(['-c'])
         .concat(commonML.foreignDependencies.map(function(fileName) {
           return path.join(packageResource.realPath, fileName);
@@ -2616,6 +2678,7 @@ var whenVerifiedPath = function() {
   }
 };
 
+var doneVerifyingJsOfOCaml = false;
 if (buildConfig.jsCompile) {
   whereis('js_of_ocaml', function(err, path) {
     if (err || !path) {
@@ -2626,8 +2689,19 @@ if (buildConfig.jsCompile) {
         'CommonML "findlibPackages": [{"dependency": "js_of_ocaml"}]'
       );
     }
-    whenVerifiedPath();
+    doneVerifyingJsOfOCaml = true;
+    doneVerifyingJsOfOCaml && doneFindingOcamlfind && whenVerifiedPath();
   });
 } else {
-  whenVerifiedPath();
+  doneVerifyingJsOfOCaml = true;
 }
+
+var doneFindingOcamlfind = false;
+whereis(OCAMLFIND, function(err, path) {
+  if (err) {
+    throw new Error('Error finding ocamlfind. Isn\'t it ironic?');
+  }
+  ocamlfindPath = path;
+  doneFindingOcamlfind = true;
+  doneVerifyingJsOfOCaml && doneFindingOcamlfind && whenVerifiedPath();
+});
