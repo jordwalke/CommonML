@@ -1,4 +1,5 @@
 var async = require('async');
+var crypto = require('crypto');
 var child_process = require('child_process');
 var asciitree = require('asciitree');
 var fs = require('fs');
@@ -139,7 +140,11 @@ var toolchainForMode = function(comp) {
 };
 
 var buildUniquenessString = function(buildConfig) {
-  return '_' + buildConfig.compiler + (buildConfig.forDebug ? '_debug' : '');
+  var compilerPathPortion =
+    buildConfig.compilerDir !== '' ?
+    '_' + buildConfig.compilerDirHash  :
+    '';
+  return '_' + buildConfig.compiler + compilerPathPortion + (buildConfig.forDebug ? '_debug' : '');
 };
 
 var actualBuildDir = function(buildConfig) {
@@ -150,12 +155,26 @@ var actualBuildDirForDocs = function(buildConfig) {
   return buildConfig.buildDir + buildUniquenessString(buildConfig) + '_doc';
 };
 
+var compilerDir = argv.compilerDir || '';
+var compilerDirHash_ =
+  crypto.createHash('md5').update(
+         path.resolve(CWD, compilerDir).split(path.sep).join('__')
+  ).digest('hex');
+var compilerDirHash = compilerDir !== '' ? compilerDirHash_.substr(0, compilerDirHash_.length / 2) : '';
 var buildConfig = {
   minVersion: argv.minVersion,
   opt: argv.opt || 1,
   yacc: argv.yacc === 'true',
   compiler: argv.compiler || 'byte',
-  compilerDir: argv.compilerDir || '',
+  /**
+   * Path to bin dir where compiler binaries are located.
+   */
+  compilerDir: compilerDir,
+  /**
+   * The hash is just to make the unique string much shorter than having the
+   * entire absolute path to the compiler.
+   */
+  compilerDirHash: compilerDirHash,
   concurrency: argv.concurrency || 4,
   buildDir: argv.buildDir || '_build',
   doc: argv.doc || false,
@@ -761,6 +780,9 @@ var getPublicSanitizedBuildDirs = function(packageConfig, rootPackageConfig, bui
   ];
 };
 
+var entireAliasBuildDir = function(rootPackageConfig, buildConfig) {
+  return path.resolve(rootPackageConfig.realPath, buildConfig.buildDir);
+};
 
 var entireActualBuildDir = function(rootPackageConfig, buildConfig) {
   return path.resolve(rootPackageConfig.realPath, actualBuildDir(buildConfig));
@@ -1796,7 +1818,7 @@ var buildExecutable = function(normalizedRootPackageName, buildPackagesResultsCa
   var jsArtifactRelativeForm = './app.js';
   var jsArtifact = shouldCompileExecutableIntoJS ? path.join(jsBuildDir, 'app.js') : null;
 
-  var symlinkBuildDirCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
+  var symlinkJsBuildDirCommands = shouldCompileExecutableIntoJS && createSymlinkCommands(
     path.join(dirToContainJsBuildDirSymlink, 'jsBuild'),
     jsBuildDir
   ).join('\n');
@@ -1823,7 +1845,7 @@ var buildExecutable = function(normalizedRootPackageName, buildPackagesResultsCa
       ensureJsBuildDirCommand,
       changeDir,
       buildJSArtifactCommand,
-      symlinkBuildDirCommands,
+      symlinkJsBuildDirCommands,
       echoJSMessage
     ] : []
   ).join('\n');
@@ -2379,11 +2401,6 @@ var getBuildConfigMightChangeCompilation = function(buildConfig, prevBuildConfig
 };
 
 function buildTree() {
-  // Might not have been created if build process failed very early.
-  var buildDirExists = fs.existsSync(actualBuildDir(buildConfig));
-  if (!buildDirExists) {
-    fs.mkdirSync(actualBuildDir(buildConfig));
-  }
   var resourceCachePath =
     path.join(CWD, actualBuildDir(buildConfig), '__resourceCache.json');
   var packageDiagnosticsPath =
@@ -2566,6 +2583,27 @@ function buildTree() {
     );
   };
 
+  var continueToCreatingSymlinks = function() {
+    var rootPackageResource = resourceCache[normalizedRootPackageName];
+    /**
+     * We point a _build directory to the most recently built version.
+     */
+    var symlinkBuildDirCommands =
+      ['mkdir -p ' + actualBuildDir(buildConfig)].concat(
+        createSymlinkCommands(
+          entireAliasBuildDir(rootPackageResource, buildConfig),
+          entireActualBuildDir(rootPackageResource, buildConfig)
+        )
+      );
+    var scripts = [{
+      description: 'Creating symlinks and build dir for top level package ' + rootPackageResource.packageName,
+      scriptLines: symlinkBuildDirCommands,
+      onFailShouldContinue: false
+    }];
+    var throwError = function(err) {throw new Error(err);};
+    executeScripts(scripts, '', throwError, continueToBuild);
+  };
+
   var yaccBuilder = function(normalizedRootPackageName, resultsCache, lexResultsCache, resourceCache, prevResourceCache, packageName, onDirtyDetectingBuilderDone) {
     var resource = resourceCache[packageName];
     var packageResources = resource.packageResources;
@@ -2647,13 +2685,13 @@ function buildTree() {
           fs.writeFileSync(packageDiagnosticsPath, JSON.stringify(recordResult.foundPackageInvalidations));
           return;
         }
-        continueToBuild();
+        continueToCreatingSymlinks();
       }
     );
   } else {
     logTitle('Building dependency packages for ' + normalizedRootPackageName);
     log('');
-    continueToBuild();
+    continueToCreatingSymlinks();
   }
 }
 
