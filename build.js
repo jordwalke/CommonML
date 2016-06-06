@@ -170,6 +170,7 @@ var buildConfig = {
    * Path to bin dir where compiler binaries are located.
    */
   compilerDir: compilerDir,
+  yaccProgram: argv.yaccProgram || OCAMLYACC,
   /**
    * The hash is just to make the unique string much shorter than having the
    * entire absolute path to the compiler.
@@ -2613,7 +2614,7 @@ function buildTree() {
       changedLexYaccFiles.yacc.length === 0 ? [] : [{
         description: 'Yaccing files',
         scriptLines: changedLexYaccFiles.yacc.map(function(absoluteFilePath) {
-          var ocamlYaccCommand = [OCAMLYACC, absoluteFilePath].join(' ');
+          var ocamlYaccCommand = [buildConfig.yaccProgram, absoluteFilePath].join(' ');
           return ['echo "Running ocamlyacc:\n' + ocamlYaccCommand + '"', ocamlYaccCommand].join('\n');
         }),
         onFailShouldContinue: false
