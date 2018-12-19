@@ -3,13 +3,8 @@
   "version": "1.0.0",
   "description": "Simple My Project example in OCaml",
   "license": "MIT",
+  "postinstall": "echo 'CommonML is no longer supported - do not use it and use esy.sh instead'",
   "dependencies": {
-    "asciitree": "1.0.0",
-    "colors": "1.1.2",
-    "whereis": "0.4.0",
-    "async": "1.4.2",
-    "cli-color": "1.1.0",
-    "optimist": "0.6.1"
   }
 }
 
