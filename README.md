@@ -469,7 +469,7 @@ TODO:
 
   - Currently an "inconsistent interface" message can occur when an interface
     file does *not* exist for an implementation file. This happens because the
-    arguments to a compilation command does not inlude an interface for obvious
+    arguments to a compilation command does not include an interface for obvious
     reasons, yet there is an *automatically* generated interface cmi sitting in
     the build directory. That cmi could be an *outdated* cmi. If there was a
     real existing interface file, the cmi would get overwritten by a fresh,
